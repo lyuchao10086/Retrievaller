@@ -4,3 +4,4 @@ dist/
 build/
 .vite/
 frontend/.vite/
+frontend/tsconfig.tsbuildinfo
