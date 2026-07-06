@@ -20,6 +20,9 @@ class DocumentStorage(Protocol):
     ) -> None:
         raise NotImplementedError
 
+    async def get_object(self, bucket_name: str, object_key: str) -> bytes:
+        raise NotImplementedError
+
 
 class MinIODocumentStorage:
     """MinIO 对象存储实现，用于保存上传的原始文件。"""
@@ -49,3 +52,16 @@ class MinIODocumentStorage:
             len(data),
             content_type=content_type,
         )
+
+    async def get_object(self, bucket_name: str, object_key: str) -> bytes:
+        """从 MinIO 读取对象字节，用于后台解析原始文件。"""
+        response = await asyncio.to_thread(
+            self.client.get_object,
+            bucket_name,
+            object_key,
+        )
+        try:
+            return await asyncio.to_thread(response.read)
+        finally:
+            response.close()
+            response.release_conn()

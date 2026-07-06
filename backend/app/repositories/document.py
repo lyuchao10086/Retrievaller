@@ -57,6 +57,19 @@ class DocumentRepository(Protocol):
     ) -> Document | None:
         raise NotImplementedError
 
+    async def set_parse_result_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        parsed_bucket: str | None,
+        parsed_object_key: str | None,
+        status: str,
+        error_message: str | None,
+        updated_at: datetime,
+    ) -> Document | None:
+        raise NotImplementedError
+
 
 class MySQLDocumentRepository:
     """文档持久化的 MySQL 实现。"""
@@ -80,11 +93,13 @@ class MySQLDocumentRepository:
                     storage_object_key,
                     status,
                     error_message,
+                    parsed_bucket,
+                    parsed_object_key,
                     task_id,
                     created_at,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     document.id,
@@ -97,6 +112,8 @@ class MySQLDocumentRepository:
                     document.storage_object_key,
                     document.status,
                     document.error_message,
+                    document.parsed_bucket,
+                    document.parsed_object_key,
                     document.task_id,
                     document.created_at,
                     document.updated_at,
@@ -125,6 +142,8 @@ class MySQLDocumentRepository:
                     storage_object_key,
                     status,
                     error_message,
+                    parsed_bucket,
+                    parsed_object_key,
                     task_id,
                     created_at,
                     updated_at
@@ -163,6 +182,8 @@ class MySQLDocumentRepository:
                     storage_object_key,
                     status,
                     error_message,
+                    parsed_bucket,
+                    parsed_object_key,
                     task_id,
                     created_at,
                     updated_at
@@ -289,6 +310,54 @@ class MySQLDocumentRepository:
             document_id,
         )
 
+    async def set_parse_result_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        parsed_bucket: str | None,
+        parsed_object_key: str | None,
+        status: str,
+        error_message: str | None,
+        updated_at: datetime,
+    ) -> Document | None:
+        """保存解析结果位置，同时更新处理状态。"""
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE documents
+                SET parsed_bucket = %s,
+                    parsed_object_key = %s,
+                    status = %s,
+                    error_message = %s,
+                    updated_at = %s
+                WHERE id = %s
+                  AND user_id = %s
+                  AND knowledge_base_id = %s
+                  AND status != 'deleted'
+                """,
+                (
+                    parsed_bucket,
+                    parsed_object_key,
+                    status,
+                    error_message,
+                    updated_at,
+                    document_id,
+                    user_id,
+                    knowledge_base_id,
+                ),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+
+        if affected_rows == 0:
+            return None
+        return await self.get_by_id_and_knowledge_base(
+            user_id,
+            knowledge_base_id,
+            document_id,
+        )
+
     async def _get_by_id_and_knowledge_base_including_deleted(
         self,
         user_id: str,
@@ -310,6 +379,8 @@ class MySQLDocumentRepository:
                     storage_object_key,
                     status,
                     error_message,
+                    parsed_bucket,
+                    parsed_object_key,
                     task_id,
                     created_at,
                     updated_at
@@ -339,6 +410,14 @@ class MySQLDocumentRepository:
             status=str(row["status"]),
             error_message=(
                 None if row["error_message"] is None else str(row["error_message"])
+            ),
+            parsed_bucket=(
+                None if row["parsed_bucket"] is None else str(row["parsed_bucket"])
+            ),
+            parsed_object_key=(
+                None
+                if row["parsed_object_key"] is None
+                else str(row["parsed_object_key"])
             ),
             task_id=None if row["task_id"] is None else str(row["task_id"]),
             created_at=row["created_at"],

@@ -56,8 +56,13 @@ async def get_db_connection() -> AsyncGenerator[aiomysql.Connection, None]:
     """FastAPI 依赖：为每个请求提供一个来自连接池的 MySQL 连接。"""
     pool = await get_database_pool()
     async with pool.acquire() as connection:
-        # yield 让 FastAPI 把这个连接注入到接口函数或 repository 里
-        yield connection
+        try:
+            # yield 让 FastAPI 把这个连接注入到接口函数或 repository 里。
+            yield connection
+        finally:
+            # autocommit=False 时，纯查询也会开启事务；请求结束时回滚空事务，
+            # 避免连接池复用旧快照，导致读不到 worker 刚提交的状态变化。
+            await connection.rollback()
 
 
 async def create_tables() -> None:
@@ -98,6 +103,8 @@ async def create_tables() -> None:
                     storage_object_key VARCHAR(1024) NOT NULL,
                     status VARCHAR(32) NOT NULL DEFAULT 'uploaded',
                     error_message TEXT NULL,
+                    parsed_bucket VARCHAR(255) NULL,
+                    parsed_object_key VARCHAR(1024) NULL,
                     task_id VARCHAR(255) NULL,
                     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
@@ -111,11 +118,55 @@ async def create_tables() -> None:
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chunks (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    knowledge_base_id VARCHAR(64) NOT NULL,
+                    document_id VARCHAR(64) NOT NULL,
+                    chunk_index INT NOT NULL,
+                    title VARCHAR(512) NULL,
+                    content TEXT NOT NULL,
+                    chapter VARCHAR(512) NULL,
+                    section VARCHAR(512) NULL,
+                    subsection VARCHAR(512) NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'created',
+                    vector_id VARCHAR(255) NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    UNIQUE KEY uq_chunks_document_index
+                        (user_id, knowledge_base_id, document_id, chunk_index),
+                    INDEX idx_chunks_user_kb_document
+                        (user_id, knowledge_base_id, document_id),
+                    INDEX idx_chunks_vector_id (vector_id),
+                    CONSTRAINT fk_chunks_knowledge_base
+                        FOREIGN KEY (knowledge_base_id)
+                        REFERENCES knowledge_bases (id),
+                    CONSTRAINT fk_chunks_document
+                        FOREIGN KEY (document_id)
+                        REFERENCES documents (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="parsed_bucket",
+                column_definition="VARCHAR(255) NULL AFTER error_message",
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="parsed_object_key",
+                column_definition="VARCHAR(1024) NULL AFTER parsed_bucket",
+            )
             await ensure_column_exists(
                 cursor,
                 table_name="documents",
                 column_name="task_id",
-                column_definition="VARCHAR(255) NULL AFTER error_message",
+                column_definition="VARCHAR(255) NULL AFTER parsed_object_key",
             )
         await connection.commit()
 

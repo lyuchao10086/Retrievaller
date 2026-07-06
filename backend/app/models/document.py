@@ -16,6 +16,8 @@ class Document:
     storage_object_key: str
     status: str
     error_message: str | None
+    parsed_bucket: str | None
+    parsed_object_key: str | None
     task_id: str | None
     created_at: datetime
     updated_at: datetime

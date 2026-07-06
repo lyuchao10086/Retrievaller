@@ -27,9 +27,15 @@ class Settings(BaseSettings):
     minio_secret_key: str = "retrievaller"
     minio_secure: bool = False
     minio_bucket_documents: str = "rag-documents"
+    minio_bucket_parsed_results: str = "rag-parsed-results"
 
     milvus_host: str = "milvus"
     milvus_port: int = 19530
+    milvus_collection_document_chunks: str = "document_chunks"
+
+    embedding_model_name: str = "quentinz/bge-large-zh-v1.5:latest"
+    embedding_dimension: int = 1024
+    ollama_base_url: str = "http://host.docker.internal:11434"
 
     health_check_timeout_seconds: float = 2.0
 

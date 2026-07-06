@@ -1,5 +1,7 @@
+import json
 import inspect
 from collections.abc import Awaitable, Callable
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -18,10 +20,28 @@ PARSED_STATUS = "parsed"
 FAILED_STATUS = "failed"
 DEFAULT_FILE_TYPE = "application/octet-stream"
 STATUS_MUST_BE_UPLOADED_MESSAGE = "Document status must be uploaded before parsing"
+DOCUMENT_NOT_PARSED_MESSAGE = "Document has not been parsed yet"
+PARSED_RESULT_NOT_FOUND_MESSAGE = "Parsed result not found"
 
 
 class DocumentStatusError(ValueError):
     """文档状态不允许执行当前操作。"""
+
+
+class KnowledgeBaseNotFoundError(LookupError):
+    """当前用户下找不到 active 知识库。"""
+
+
+class DocumentNotFoundError(LookupError):
+    """当前知识库沙箱下找不到可见文档。"""
+
+
+class ParsedDocumentNotReadyError(ValueError):
+    """文档还没有进入 parsed 状态，不能预览解析结果。"""
+
+
+class ParsedResultNotFoundError(ValueError):
+    """文档已 parsed，但缺少解析结果对象位置。"""
 
 
 async def upload_document_to_knowledge_base(
@@ -74,6 +94,8 @@ async def upload_document_to_knowledge_base(
         storage_object_key=object_key,
         status=UPLOADED_STATUS,
         error_message=None,
+        parsed_bucket=None,
+        parsed_object_key=None,
         # 异步解析任务提交前没有 task_id，提交后会写入 Celery 返回的任务 ID。
         task_id=None,
         created_at=now,
@@ -106,6 +128,44 @@ async def get_document_by_id(
         kb_id,
         document_id,
     )
+
+
+async def get_parsed_document_content(
+    knowledge_base_repository: KnowledgeBaseRepository,
+    document_repository: DocumentRepository,
+    storage: DocumentStorage,
+    kb_id: str,
+    document_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> dict[str, Any]:
+    """读取指定知识库下文档的 parsed JSON。
+
+    这里同时校验知识库、用户、文档和解析状态，避免跨知识库读取解析结果。
+    """
+    knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
+        kb_id,
+        user_id,
+    )
+    if knowledge_base is None:
+        raise KnowledgeBaseNotFoundError("Knowledge base not found")
+
+    document = await document_repository.get_by_id_and_knowledge_base(
+        user_id,
+        kb_id,
+        document_id,
+    )
+    if document is None:
+        raise DocumentNotFoundError("Document not found")
+    if document.status != PARSED_STATUS:
+        raise ParsedDocumentNotReadyError(DOCUMENT_NOT_PARSED_MESSAGE)
+    if not document.parsed_bucket or not document.parsed_object_key:
+        raise ParsedResultNotFoundError(PARSED_RESULT_NOT_FOUND_MESSAGE)
+
+    parsed_bytes = await storage.get_object(
+        document.parsed_bucket,
+        document.parsed_object_key,
+    )
+    return json.loads(parsed_bytes.decode("utf-8"))
 
 
 async def delete_document(
