@@ -1,15 +1,25 @@
 from typing import Annotated
 
 import aiomysql
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.core.database import get_db_connection
 from app.repositories.knowledge_base import (
     KnowledgeBaseRepository,
     MySQLKnowledgeBaseRepository,
 )
-from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseResponse
-from app.services.knowledge_base import create_knowledge_base, list_knowledge_bases
+from app.schemas.knowledge_base import (
+    KnowledgeBaseCreate,
+    KnowledgeBaseResponse,
+    KnowledgeBaseUpdate,
+)
+from app.services.knowledge_base import (
+    create_knowledge_base,
+    delete_knowledge_base,
+    get_knowledge_base,
+    list_knowledge_bases,
+    update_knowledge_base,
+)
 
 
 router = APIRouter(prefix="/api/knowledge-bases", tags=["knowledge-bases"])
@@ -52,3 +62,58 @@ async def list_knowledge_bases_api(
         KnowledgeBaseResponse.model_validate(knowledge_base)
         for knowledge_base in knowledge_bases
     ]
+
+
+@router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
+async def get_knowledge_base_api(
+    kb_id: str,
+    repository: Annotated[
+        KnowledgeBaseRepository,
+        Depends(get_knowledge_base_repository),
+    ],
+) -> KnowledgeBaseResponse:
+    """查询默认用户可见的单个 active 知识库，查不到时返回 404。"""
+    knowledge_base = await get_knowledge_base(repository, kb_id)
+    if knowledge_base is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge base not found",
+        )
+    return KnowledgeBaseResponse.model_validate(knowledge_base)
+
+
+@router.put("/{kb_id}", response_model=KnowledgeBaseResponse)
+async def update_knowledge_base_api(
+    kb_id: str,
+    payload: KnowledgeBaseUpdate,
+    repository: Annotated[
+        KnowledgeBaseRepository,
+        Depends(get_knowledge_base_repository),
+    ],
+) -> KnowledgeBaseResponse:
+    """修改默认用户可见的 active 知识库，查不到时返回 404。"""
+    knowledge_base = await update_knowledge_base(repository, kb_id, payload)
+    if knowledge_base is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge base not found",
+        )
+    return KnowledgeBaseResponse.model_validate(knowledge_base)
+
+
+@router.delete("/{kb_id}", response_model=KnowledgeBaseResponse)
+async def delete_knowledge_base_api(
+    kb_id: str,
+    repository: Annotated[
+        KnowledgeBaseRepository,
+        Depends(get_knowledge_base_repository),
+    ],
+) -> KnowledgeBaseResponse:
+    """软删除默认用户可见的 active 知识库，查不到时返回 404。"""
+    knowledge_base = await delete_knowledge_base(repository, kb_id)
+    if knowledge_base is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge base not found",
+        )
+    return KnowledgeBaseResponse.model_validate(knowledge_base)

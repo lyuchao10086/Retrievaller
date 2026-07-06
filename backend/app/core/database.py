@@ -85,4 +85,65 @@ async def create_tables() -> None:
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS documents (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    knowledge_base_id VARCHAR(64) NOT NULL,
+                    file_name VARCHAR(512) NOT NULL,
+                    file_type VARCHAR(128) NOT NULL,
+                    file_size BIGINT NOT NULL,
+                    storage_bucket VARCHAR(255) NOT NULL,
+                    storage_object_key VARCHAR(1024) NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'uploaded',
+                    error_message TEXT NULL,
+                    task_id VARCHAR(255) NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    INDEX idx_doc_user_kb_created_at
+                        (user_id, knowledge_base_id, created_at),
+                    INDEX idx_doc_knowledge_base_id (knowledge_base_id),
+                    CONSTRAINT fk_documents_knowledge_base
+                        FOREIGN KEY (knowledge_base_id)
+                        REFERENCES knowledge_bases (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="task_id",
+                column_definition="VARCHAR(255) NULL AFTER error_message",
+            )
         await connection.commit()
+
+
+async def ensure_column_exists(
+    cursor: aiomysql.Cursor,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    """给自动建表模式补充新增列。
+
+    当前项目还没有 Alembic；已有数据库不会因为 CREATE TABLE IF NOT EXISTS
+    自动新增字段，所以这里显式检查并 ALTER。
+    """
+    await cursor.execute(
+        """
+        SELECT COUNT(*)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND COLUMN_NAME = %s
+        """,
+        (table_name, column_name),
+    )
+    row = await cursor.fetchone()
+    column_exists = bool(row and row[0])
+    if not column_exists:
+        await cursor.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )

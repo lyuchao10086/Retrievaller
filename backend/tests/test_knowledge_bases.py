@@ -3,11 +3,14 @@ from fastapi.testclient import TestClient
 from app.api.routes.knowledge_base import get_knowledge_base_repository
 from app.main import app
 from app.models.knowledge_base import KnowledgeBase
-from app.schemas.knowledge_base import KnowledgeBaseCreate
+from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from app.services.knowledge_base import (
     DEFAULT_USER_ID,
     create_knowledge_base,
+    delete_knowledge_base,
+    get_knowledge_base,
     list_knowledge_bases,
+    update_knowledge_base,
 )
 
 
@@ -25,6 +28,28 @@ class InMemoryKnowledgeBaseRepository:
             for item in self.items
             if item.user_id == user_id and item.status == "active"
         ]
+
+    async def get_active_by_id_and_user(self, kb_id, user_id):
+        for item in self.items:
+            if item.id == kb_id and item.user_id == user_id and item.status == "active":
+                return item
+        return None
+
+    async def update_active_by_id_and_user(self, kb_id, user_id, updates):
+        knowledge_base = await self.get_active_by_id_and_user(kb_id, user_id)
+        if knowledge_base is None:
+            return None
+        for field_name, value in updates.items():
+            setattr(knowledge_base, field_name, value)
+        return knowledge_base
+
+    async def soft_delete_active_by_id_and_user(self, kb_id, user_id, deleted_at):
+        knowledge_base = await self.get_active_by_id_and_user(kb_id, user_id)
+        if knowledge_base is None:
+            return None
+        knowledge_base.status = "deleted"
+        knowledge_base.updated_at = deleted_at
+        return knowledge_base
 
 
 def test_create_knowledge_base_uses_default_user_and_active_status():
@@ -82,6 +107,143 @@ def test_list_knowledge_bases_only_returns_active_default_user_items():
     assert [item.name for item in items] == ["默认用户 active"]
 
 
+def test_get_knowledge_base_only_returns_active_default_user_item():
+    repository = InMemoryKnowledgeBaseRepository()
+    active = run_async(
+        create_knowledge_base(
+            repository,
+            KnowledgeBaseCreate(name="默认用户 active"),
+        )
+    )
+    repository.items.append(
+        KnowledgeBase(
+            id="kb_inactive",
+            user_id=DEFAULT_USER_ID,
+            name="默认用户 inactive",
+            description=None,
+            status="archived",
+            created_at=active.created_at,
+            updated_at=active.updated_at,
+        )
+    )
+    repository.items.append(
+        KnowledgeBase(
+            id="kb_other_user",
+            user_id="other_user",
+            name="其他用户 active",
+            description=None,
+            status="active",
+            created_at=active.created_at,
+            updated_at=active.updated_at,
+        )
+    )
+
+    found = run_async(get_knowledge_base(repository, active.id))
+    inactive = run_async(get_knowledge_base(repository, "kb_inactive"))
+    other_user = run_async(get_knowledge_base(repository, "kb_other_user"))
+    missing = run_async(get_knowledge_base(repository, "kb_missing"))
+
+    assert found == active
+    assert inactive is None
+    assert other_user is None
+    assert missing is None
+
+
+def test_update_knowledge_base_only_updates_active_default_user_item():
+    repository = InMemoryKnowledgeBaseRepository()
+    active = run_async(
+        create_knowledge_base(
+            repository,
+            KnowledgeBaseCreate(name="旧名称", description="旧描述"),
+        )
+    )
+    original_updated_at = active.updated_at
+    repository.items.append(
+        KnowledgeBase(
+            id="kb_other_user",
+            user_id="other_user",
+            name="其他用户 active",
+            description=None,
+            status="active",
+            created_at=active.created_at,
+            updated_at=active.updated_at,
+        )
+    )
+
+    updated = run_async(
+        update_knowledge_base(
+            repository,
+            active.id,
+            KnowledgeBaseUpdate(name="新名称", description="新描述"),
+        )
+    )
+    other_user = run_async(
+        update_knowledge_base(
+            repository,
+            "kb_other_user",
+            KnowledgeBaseUpdate(name="不该更新"),
+        )
+    )
+
+    assert updated is not None
+    assert updated.id == active.id
+    assert updated.name == "新名称"
+    assert updated.description == "新描述"
+    assert updated.user_id == DEFAULT_USER_ID
+    assert updated.status == "active"
+    assert updated.updated_at > original_updated_at
+    assert other_user is None
+
+
+def test_delete_knowledge_base_soft_deletes_active_default_user_item():
+    repository = InMemoryKnowledgeBaseRepository()
+    active = run_async(
+        create_knowledge_base(
+            repository,
+            KnowledgeBaseCreate(name="待删除", description="只做软删除"),
+        )
+    )
+    original_updated_at = active.updated_at
+
+    deleted = run_async(delete_knowledge_base(repository, active.id))
+    listed_items = run_async(list_knowledge_bases(repository))
+    found_after_delete = run_async(get_knowledge_base(repository, active.id))
+
+    assert deleted is not None
+    assert deleted.id == active.id
+    assert deleted.status == "deleted"
+    assert deleted.updated_at > original_updated_at
+    assert listed_items == []
+    assert found_after_delete is None
+
+
+def test_delete_knowledge_base_only_deletes_active_default_user_item():
+    repository = InMemoryKnowledgeBaseRepository()
+    active = run_async(
+        create_knowledge_base(
+            repository,
+            KnowledgeBaseCreate(name="默认用户 active"),
+        )
+    )
+    repository.items.append(
+        KnowledgeBase(
+            id="kb_other_user",
+            user_id="other_user",
+            name="其他用户 active",
+            description=None,
+            status="active",
+            created_at=active.created_at,
+            updated_at=active.updated_at,
+        )
+    )
+
+    other_user = run_async(delete_knowledge_base(repository, "kb_other_user"))
+    missing = run_async(delete_knowledge_base(repository, "kb_missing"))
+
+    assert other_user is None
+    assert missing is None
+
+
 def test_knowledge_base_api_can_create_and_list_items():
     repository = InMemoryKnowledgeBaseRepository()
 
@@ -113,6 +275,162 @@ def test_knowledge_base_api_can_create_and_list_items():
 
     assert list_response.status_code == 200
     assert list_response.json() == [created]
+
+
+def test_knowledge_base_api_can_get_item_by_id():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        create_response = client.post(
+            "/api/knowledge-bases",
+            json={"name": "详情测试库", "description": "用于详情查询"},
+        )
+        created = create_response.json()
+
+        detail_response = client.get(f"/api/knowledge-bases/{created['id']}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert detail_response.status_code == 200
+    assert detail_response.json() == created
+
+
+def test_knowledge_base_api_returns_404_when_item_is_not_visible():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        response = client.get("/api/knowledge-bases/kb_missing")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Knowledge base not found"}
+
+
+def test_knowledge_base_api_can_update_item_by_id():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        create_response = client.post(
+            "/api/knowledge-bases",
+            json={"name": "修改前", "description": "旧描述"},
+        )
+        created = create_response.json()
+
+        update_response = client.put(
+            f"/api/knowledge-bases/{created['id']}",
+            json={"name": "修改后", "description": "新描述"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["id"] == created["id"]
+    assert updated["user_id"] == DEFAULT_USER_ID
+    assert updated["name"] == "修改后"
+    assert updated["description"] == "新描述"
+    assert updated["status"] == "active"
+    assert updated["created_at"] == created["created_at"]
+    assert updated["updated_at"] > created["updated_at"]
+
+
+def test_knowledge_base_api_returns_404_when_update_target_is_not_visible():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        response = client.put(
+            "/api/knowledge-bases/kb_missing",
+            json={"name": "不会创建"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Knowledge base not found"}
+
+
+def test_knowledge_base_api_can_soft_delete_item_by_id():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        create_response = client.post(
+            "/api/knowledge-bases",
+            json={"name": "准备删除", "description": "删除后列表不可见"},
+        )
+        created = create_response.json()
+
+        delete_response = client.delete(f"/api/knowledge-bases/{created['id']}")
+        list_response = client.get("/api/knowledge-bases")
+        detail_response = client.get(f"/api/knowledge-bases/{created['id']}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert delete_response.status_code == 200
+    deleted = delete_response.json()
+    assert deleted["id"] == created["id"]
+    assert deleted["user_id"] == DEFAULT_USER_ID
+    assert deleted["status"] == "deleted"
+    assert deleted["created_at"] == created["created_at"]
+    assert deleted["updated_at"] > created["updated_at"]
+    assert list_response.status_code == 200
+    assert list_response.json() == []
+    assert detail_response.status_code == 404
+    assert detail_response.json() == {"detail": "Knowledge base not found"}
+
+
+def test_knowledge_base_api_returns_404_when_delete_target_is_not_visible():
+    repository = InMemoryKnowledgeBaseRepository()
+
+    async def override_get_knowledge_base_repository():
+        return repository
+
+    app.dependency_overrides[
+        get_knowledge_base_repository
+    ] = override_get_knowledge_base_repository
+    try:
+        client = TestClient(app)
+        response = client.delete("/api/knowledge-bases/kb_missing")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Knowledge base not found"}
 
 
 def run_async(coro):

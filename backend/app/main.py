@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI
 
+from app.api.routes.document import router as document_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge_base import router as knowledge_base_router
 from app.core.config import get_settings
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
     application = FastAPI(title=settings.app_name, lifespan=lifespan)
     application.include_router(health_router)
     application.include_router(knowledge_base_router)
+    application.include_router(document_router)
     return application
 
 

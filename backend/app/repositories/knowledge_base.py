@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 
 import aiomysql
@@ -12,6 +13,29 @@ class KnowledgeBaseRepository(Protocol):
         raise NotImplementedError
 
     async def list_active_by_user(self, user_id: str) -> list[KnowledgeBase]:
+        raise NotImplementedError
+
+    async def get_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+    ) -> KnowledgeBase | None:
+        raise NotImplementedError
+
+    async def update_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+        updates: dict[str, object],
+    ) -> KnowledgeBase | None:
+        raise NotImplementedError
+
+    async def soft_delete_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+        deleted_at: datetime,
+    ) -> KnowledgeBase | None:
         raise NotImplementedError
 
 
@@ -71,6 +95,132 @@ class MySQLKnowledgeBaseRepository:
             )
             rows = await cursor.fetchall()
         return [self._from_row(row) for row in rows]
+
+    async def get_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+    ) -> KnowledgeBase | None:
+        """按知识库沙箱边界查询单条记录。
+
+        这里同时限制 id、user_id、status，避免用户通过猜测 kb_id 访问到
+        其他用户或已归档的知识库。
+        """
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM knowledge_bases
+                WHERE id = %s AND user_id = %s AND status = 'active'
+                LIMIT 1
+                """,
+                (kb_id, user_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._from_row(row)
+
+    async def update_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+        updates: dict[str, object],
+    ) -> KnowledgeBase | None:
+        """只更新当前用户 active 知识库允许变更的字段。
+
+        service 层已经把 updates 限制为 name、description、updated_at；
+        SQL 层再次限制 id、user_id、status，形成最后一道沙箱边界。
+        """
+        if not updates:
+            return await self.get_active_by_id_and_user(kb_id, user_id)
+
+        allowed_fields = ("name", "description", "updated_at")
+        assignments = [
+            f"{field_name} = %s"
+            for field_name in allowed_fields
+            if field_name in updates
+        ]
+        values = [
+            updates[field_name]
+            for field_name in allowed_fields
+            if field_name in updates
+        ]
+        values.extend([kb_id, user_id])
+
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                f"""
+                UPDATE knowledge_bases
+                SET {", ".join(assignments)}
+                WHERE id = %s AND user_id = %s AND status = 'active'
+                """,
+                tuple(values),
+            )
+        await self.connection.commit()
+        return await self.get_active_by_id_and_user(kb_id, user_id)
+
+    async def soft_delete_active_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+        deleted_at: datetime,
+    ) -> KnowledgeBase | None:
+        """软删除当前用户的 active 知识库。
+
+        这里只更新 knowledge_bases 表的 status，不删除 MinIO 文件或 Milvus 向量；
+        后续如果要做资源回收，应由独立后台任务显式处理。
+        """
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE knowledge_bases
+                SET status = 'deleted', updated_at = %s
+                WHERE id = %s AND user_id = %s AND status = 'active'
+                """,
+                (deleted_at, kb_id, user_id),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+
+        if affected_rows == 0:
+            return None
+        return await self._get_by_id_and_user(kb_id, user_id)
+
+    async def _get_by_id_and_user(
+        self,
+        kb_id: str,
+        user_id: str,
+    ) -> KnowledgeBase | None:
+        """按 id 和 user_id 查询记录，用于返回刚刚软删除后的对象。"""
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM knowledge_bases
+                WHERE id = %s AND user_id = %s
+                LIMIT 1
+                """,
+                (kb_id, user_id),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._from_row(row)
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> KnowledgeBase:

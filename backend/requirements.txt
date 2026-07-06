@@ -1,8 +1,10 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic-settings==2.7.1
+python-multipart==0.0.20
 aiomysql==0.2.0
 redis==5.2.1
+celery[redis]==5.4.0
 minio==7.2.14
 pymilvus==2.5.4
 setuptools<81

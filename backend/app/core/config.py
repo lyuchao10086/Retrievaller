@@ -20,12 +20,13 @@ class Settings(BaseSettings):
     redis_host: str = "redis"
     redis_port: int = 6379
     redis_db: int = 0
+    redis_result_db: int = 1
 
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "retrievaller"
     minio_secret_key: str = "retrievaller"
     minio_secure: bool = False
-    minio_bucket_documents: str = "documents"
+    minio_bucket_documents: str = "rag-documents"
 
     milvus_host: str = "milvus"
     milvus_port: int = 19530
@@ -42,3 +43,10 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def build_redis_url(db: int | None = None) -> str:
+    """构造 Redis URL，供 Celery broker/result backend 使用。"""
+    settings = get_settings()
+    redis_db = settings.redis_db if db is None else db
+    return f"redis://{settings.redis_host}:{settings.redis_port}/{redis_db}"
