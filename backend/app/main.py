@@ -11,7 +11,7 @@ from app.core.database import close_database, init_database
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
-    """Open shared resources on startup and release them on shutdown."""
+    """应用启动时打开共享资源，关闭时释放共享资源。"""
     await init_database()
     try:
         yield
@@ -20,7 +20,7 @@ async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
 
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application instance."""
+    """创建并配置 FastAPI 应用实例。"""
     settings = get_settings()
     application = FastAPI(title=settings.app_name, lifespan=lifespan)
     application.include_router(health_router)

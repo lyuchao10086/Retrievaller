@@ -6,7 +6,7 @@ from app.models.knowledge_base import KnowledgeBase
 
 
 class KnowledgeBaseRepository(Protocol):
-    """Storage contract used by the knowledge base service layer."""
+    """知识库 service 层依赖的数据存储接口约定。"""
 
     async def insert(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
         raise NotImplementedError
@@ -16,13 +16,13 @@ class KnowledgeBaseRepository(Protocol):
 
 
 class MySQLKnowledgeBaseRepository:
-    """MySQL implementation of knowledge base persistence."""
+    """知识库持久化的 MySQL 实现。"""
 
     def __init__(self, connection: aiomysql.Connection):
         self.connection = connection
 
     async def insert(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
-        """Persist one knowledge base row and return the saved entity."""
+        """保存一条知识库记录，并返回已保存的实体。"""
         async with self.connection.cursor() as cursor:
             await cursor.execute(
                 """
@@ -51,7 +51,7 @@ class MySQLKnowledgeBaseRepository:
         return knowledge_base
 
     async def list_active_by_user(self, user_id: str) -> list[KnowledgeBase]:
-        """List active knowledge bases owned by one logical user."""
+        """查询某个逻辑用户拥有的 active 状态知识库。"""
         async with self.connection.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(
                 """
@@ -74,7 +74,7 @@ class MySQLKnowledgeBaseRepository:
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> KnowledgeBase:
-        """Convert an aiomysql DictCursor row into the internal entity."""
+        """将 aiomysql DictCursor 返回的行数据转换为内部实体。"""
         return KnowledgeBase(
             id=str(row["id"]),
             user_id=str(row["user_id"]),

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/knowledge-bases", tags=["knowledge-bases"])
 async def get_knowledge_base_repository(
     connection: Annotated[aiomysql.Connection, Depends(get_db_connection)],
 ) -> KnowledgeBaseRepository:
-    """Bind the current request's MySQL connection to a repository instance."""
+    """将当前请求的 MySQL 连接包装成 repository 实例。"""
     return MySQLKnowledgeBaseRepository(connection)
 
 
@@ -34,7 +34,7 @@ async def create_knowledge_base_api(
         Depends(get_knowledge_base_repository),
     ],
 ) -> KnowledgeBaseResponse:
-    """Create one active knowledge base for the default user."""
+    """为默认用户创建一个 active 状态的知识库。"""
     knowledge_base = await create_knowledge_base(repository, payload)
     return KnowledgeBaseResponse.model_validate(knowledge_base)
 
@@ -46,7 +46,7 @@ async def list_knowledge_bases_api(
         Depends(get_knowledge_base_repository),
     ],
 ) -> list[KnowledgeBaseResponse]:
-    """List active knowledge bases for the default user."""
+    """列出默认用户下 active 状态的知识库。"""
     knowledge_bases = await list_knowledge_bases(repository)
     return [
         KnowledgeBaseResponse.model_validate(knowledge_base)
