@@ -4,6 +4,8 @@ from datetime import datetime
 
 @dataclass(slots=True)
 class KnowledgeBase:
+    """Internal knowledge base entity used between service and repository layers."""
+
     id: str
     user_id: str
     name: str

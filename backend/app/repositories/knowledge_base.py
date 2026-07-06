@@ -6,6 +6,8 @@ from app.models.knowledge_base import KnowledgeBase
 
 
 class KnowledgeBaseRepository(Protocol):
+    """Storage contract used by the knowledge base service layer."""
+
     async def insert(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
         raise NotImplementedError
 
@@ -14,10 +16,13 @@ class KnowledgeBaseRepository(Protocol):
 
 
 class MySQLKnowledgeBaseRepository:
+    """MySQL implementation of knowledge base persistence."""
+
     def __init__(self, connection: aiomysql.Connection):
         self.connection = connection
 
     async def insert(self, knowledge_base: KnowledgeBase) -> KnowledgeBase:
+        """Persist one knowledge base row and return the saved entity."""
         async with self.connection.cursor() as cursor:
             await cursor.execute(
                 """
@@ -46,6 +51,7 @@ class MySQLKnowledgeBaseRepository:
         return knowledge_base
 
     async def list_active_by_user(self, user_id: str) -> list[KnowledgeBase]:
+        """List active knowledge bases owned by one logical user."""
         async with self.connection.cursor(aiomysql.DictCursor) as cursor:
             await cursor.execute(
                 """
@@ -68,6 +74,7 @@ class MySQLKnowledgeBaseRepository:
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> KnowledgeBase:
+        """Convert an aiomysql DictCursor row into the internal entity."""
         return KnowledgeBase(
             id=str(row["id"]),
             user_id=str(row["user_id"]),

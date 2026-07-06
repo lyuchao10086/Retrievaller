@@ -9,6 +9,7 @@ _pool: aiomysql.Pool | None = None
 
 
 def build_mysql_pool_config(settings: Settings) -> dict[str, object]:
+    """Build aiomysql connection options from application settings."""
     return {
         "host": settings.mysql_host,
         "port": settings.mysql_port,
@@ -21,6 +22,7 @@ def build_mysql_pool_config(settings: Settings) -> dict[str, object]:
 
 
 async def init_database() -> None:
+    """Initialize the shared MySQL pool and make sure required tables exist."""
     global _pool
 
     if _pool is None:
@@ -30,6 +32,7 @@ async def init_database() -> None:
 
 
 async def close_database() -> None:
+    """Close the shared MySQL pool during application shutdown."""
     global _pool
 
     if _pool is None:
@@ -41,6 +44,7 @@ async def close_database() -> None:
 
 
 async def get_database_pool() -> aiomysql.Pool:
+    """Return the shared MySQL pool, creating it lazily if needed."""
     if _pool is None:
         await init_database()
     if _pool is None:
@@ -49,12 +53,18 @@ async def get_database_pool() -> aiomysql.Pool:
 
 
 async def get_db_connection() -> AsyncGenerator[aiomysql.Connection, None]:
+    """FastAPI dependency that yields one pooled MySQL connection per request."""
     pool = await get_database_pool()
     async with pool.acquire() as connection:
         yield connection
 
 
 async def create_tables() -> None:
+    """Create tables needed by the current backend phase.
+
+    This lightweight bootstrap keeps phase 1 simple. When schema changes become
+    more complex, this should move to a migration tool such as Alembic.
+    """
     pool = await get_database_pool()
     async with pool.acquire() as connection:
         async with connection.cursor() as cursor:
