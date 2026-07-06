@@ -9,7 +9,7 @@ _pool: aiomysql.Pool | None = None
 
 
 def build_mysql_pool_config(settings: Settings) -> dict[str, object]:
-    """根据应用配置生成 aiomysql 连接参数。"""
+    """把config中的配置转成 aiomysql 能识别的连接参数。"""
     return {
         "host": settings.mysql_host,
         "port": settings.mysql_port,
@@ -56,6 +56,7 @@ async def get_db_connection() -> AsyncGenerator[aiomysql.Connection, None]:
     """FastAPI 依赖：为每个请求提供一个来自连接池的 MySQL 连接。"""
     pool = await get_database_pool()
     async with pool.acquire() as connection:
+        # yield 让 FastAPI 把这个连接注入到接口函数或 repository 里
         yield connection
 
 

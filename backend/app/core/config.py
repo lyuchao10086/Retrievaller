@@ -6,15 +6,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 
-
+# Pydantic 会自动把环境变量转换成正确类型
 class Settings(BaseSettings):
-    app_name: str = "Retrievaller Backend"
+    app_name: str = "retrievaller"
     app_env: str = "development"
 
     mysql_host: str = "mysql"
     mysql_port: int = 3306
     mysql_user: str = "retrievaller"
-    mysql_password: str = "retrievaller_password"
+    mysql_password: str = "retrievaller"
     mysql_database: str = "retrievaller"
 
     redis_host: str = "redis"
@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     redis_db: int = 0
 
     minio_endpoint: str = "minio:9000"
-    minio_access_key: str = "minioadmin"
-    minio_secret_key: str = "minioadmin"
+    minio_access_key: str = "retrievaller"
+    minio_secret_key: str = "retrievaller"
     minio_secure: bool = False
     minio_bucket_documents: str = "documents"
 
