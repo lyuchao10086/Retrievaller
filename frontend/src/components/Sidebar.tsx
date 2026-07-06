@@ -250,7 +250,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
         </nav>
       </div>
 
-      <div className="mt-24 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+      <div className="mt-10 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
         <div className="mb-3 flex items-center gap-2 px-2 text-xs text-[#999]">
           <History className="h-3.5 w-3.5" />
           历史对话

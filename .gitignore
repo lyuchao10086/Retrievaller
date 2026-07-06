@@ -1,7 +1,12 @@
 .DS_Store
+.env
 node_modules/
 dist/
 build/
 .vite/
 frontend/.vite/
 frontend/tsconfig.tsbuildinfo
+backend/.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
