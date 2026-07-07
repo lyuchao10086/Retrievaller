@@ -4,6 +4,7 @@ import Dashboard from "./components/Dashboard"
 import UploadPage from "./components/UploadPage"
 import OCRPage from "./components/OCRPage"
 import KnowledgeBasePage from "./components/KnowledgeBasePage"
+import KnowledgeBaseGridPage from "./components/KnowledgeBaseGridPage"
 import ChatPage from "./components/ChatPage"
 import QaRecordsPage from "./components/QaRecordsPage"
 import CitationPage from "./components/CitationPage"
@@ -15,7 +16,8 @@ const pageMap: Record<Exclude<MenuKey, "chat">, JSX.Element> = {
   dashboard: <Dashboard />,
   upload: <UploadPage />,
   ocr: <OCRPage />,
-  knowledge: <KnowledgeBasePage />,
+  knowledge: <KnowledgeBaseGridPage />,
+  kbBuild: <KnowledgeBasePage />,
   qaRecords: <QaRecordsPage />,
   citations: <CitationPage />,
   evaluation: <EvaluationPage />,

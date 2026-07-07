@@ -19,10 +19,11 @@ export function answerKnowledgeBaseQuestion(
   })
 }
 
-export function answerQuestionAcrossKnowledgeBases(payload: MultiRagAnswerRequest) {
+export function answerQuestionAcrossKnowledgeBases(payload: MultiRagAnswerRequest, signal?: AbortSignal) {
   return request<MultiRagAnswerResponse>("/api/rag/answer", {
     method: "POST",
-    body: payload
+    body: payload,
+    signal
   })
 }
 

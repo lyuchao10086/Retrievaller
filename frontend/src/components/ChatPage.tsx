@@ -10,6 +10,7 @@ import {
   Paperclip,
   Share2,
   Sparkles,
+  StopCircle,
   UserRound
 } from "lucide-react"
 import { ApiError } from "@/api/client"
@@ -58,24 +59,30 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   const [question, setQuestion] = useState("")
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
+  const [onlineSearch, setOnlineSearch] = useState(false)
   const [suggestions, setSuggestions] = useState(DEFAULT_SUGGESTIONS)
   const [kbPickerOpen, setKbPickerOpen] = useState(false)
   const [kbPickerPosition, setKbPickerPosition] = useState({ left: 0, bottom: 0, width: 360 })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const formRef = useRef<HTMLFormElement | null>(null)
+  const kbTriggerRef = useRef<HTMLDivElement | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   const selectedKnowledgeBases = useMemo(
     () => knowledgeBases.filter((item) => selectedKbIds.includes(item.id)),
     [knowledgeBases, selectedKbIds]
   )
   const selectedKnowledgeBaseText = useMemo(
-    () =>
-      selectedKnowledgeBases.length > 0
-        ? selectedKnowledgeBases.map((item) => item.name).join("、")
-        : "联网模式：暂无默认知识库",
+    () => {
+      if (selectedKnowledgeBases.length === 0) {
+        return "暂无选择，请先选择知识库"
+      }
+      return selectedKnowledgeBases.map((item) => item.name).join("、")
+    },
     [selectedKnowledgeBases]
   )
+  const noKbSelected = selectedKnowledgeBases.length === 0
 
   useEffect(() => {
     let ignore = false
@@ -131,13 +138,34 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   }, [selectedKnowledgeBases])
 
   const updateKbPickerPosition = () => {
-    const rect = formRef.current?.getBoundingClientRect()
-    if (!rect) return
+    const triggerRect = kbTriggerRef.current?.getBoundingClientRect()
+    if (!triggerRect) return
+
+    // Measure text to compute dynamic width based on longest KB name
+    const canvas = document.createElement("canvas")
+    const ctx = canvas.getContext("2d")
+    let maxTextWidth = 0
+    if (ctx) {
+      ctx.font = "500 14px system-ui, sans-serif"
+      for (const kb of knowledgeBases) {
+        const nameWidth = ctx.measureText(kb.name).width
+        let descWidth = 0
+        if (kb.description) {
+          ctx.font = "12px system-ui, sans-serif"
+          descWidth = ctx.measureText(kb.description).width
+          ctx.font = "500 14px system-ui, sans-serif"
+        }
+        maxTextWidth = Math.max(maxTextWidth, nameWidth, descWidth)
+      }
+    }
+    // icon(24) + gap(8) + text + checkmark(16) + gap(8) + padding(24)
+    const contentWidth = Math.ceil(maxTextWidth) + 80
+    const pickerWidth = Math.max(220, Math.min(contentWidth, window.innerWidth - 32))
 
     setKbPickerPosition({
-      left: rect.left + rect.width / 2,
-      bottom: Math.max(16, window.innerHeight - rect.top + 12),
-      width: Math.min(360, window.innerWidth - 32)
+      left: triggerRect.left,
+      bottom: Math.max(16, window.innerHeight - triggerRect.top + 8),
+      width: pickerWidth,
     })
   }
 
@@ -193,12 +221,18 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
     ])
     setQuestion("")
 
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     try {
-      const response = await answerQuestionAcrossKnowledgeBases({
-        query: trimmed,
-        knowledge_base_ids: selectedKbIds,
-        top_k: readDefaultTopK()
-      })
+      const response = await answerQuestionAcrossKnowledgeBases(
+        {
+          query: trimmed,
+          knowledge_base_ids: selectedKbIds,
+          top_k: readDefaultTopK()
+        },
+        controller.signal
+      )
       setMessages((current) => [
         ...current,
         {
@@ -210,11 +244,26 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
       ])
       window.dispatchEvent(new Event("retrievaller:qa-records-updated"))
     } catch (unknownError) {
-      setError(readErrorMessage(unknownError))
-      setMessages((current) => current.filter((_, index) => index !== current.length - 1))
+      if (unknownError instanceof DOMException && unknownError.name === "AbortError") {
+        setMessages((current) =>
+          current.map((message, index) =>
+            index === current.length - 1 && message.role === "user"
+              ? { ...message, content: `${message.content}\n\n[已中断]` }
+              : message
+          )
+        )
+      } else {
+        setError(readErrorMessage(unknownError))
+        setMessages((current) => current.filter((_, index) => index !== current.length - 1))
+      }
     } finally {
+      abortControllerRef.current = null
       setLoading(false)
     }
+  }
+
+  const stopQuestion = () => {
+    abortControllerRef.current?.abort()
   }
 
   const evaluateMessage = async (messageIndex: number, qaRecordId: string) => {
@@ -263,7 +312,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
         </button>
         <div className="text-center">
           <h1 className="text-sm font-semibold text-[#111]">知识库问答</h1>
-          <p className="mt-1 text-[11px] text-[#9aa3b2]">请选择一个或多个知识库作为检索范围。</p>
+          <p className="mt-1 text-[11px] text-[#9aa3b2]">请选择一个或多个知识库作为检索范围，无知识库则联网</p>
         </div>
         <div className="group absolute right-6 top-1/2 -translate-y-1/2">
           <button
@@ -291,22 +340,29 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
           {messages.length === 0 ? (
             <div className="flex w-full min-w-0 flex-1 flex-col items-center justify-center pb-36 pt-16">
               <h2 className="text-center text-2xl font-bold tracking-normal text-[#111] sm:text-3xl">有什么我能帮你的吗？</h2>
-              <div className="mt-4 flex max-w-full items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-4 py-2 text-sm text-blue-700">
+              <div className={cn(
+                "mt-4 flex max-w-full items-center gap-2 rounded-full border px-4 py-2 text-sm transition",
+                selectedKnowledgeBases.length > 0
+                  ? "border-blue-100 bg-blue-50 text-blue-700"
+                  : "border-[#e0e0e0] bg-[#f5f5f5] text-[#999]"
+              )}>
                 <Database className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 truncate">默认知识库：{selectedKnowledgeBaseText}</span>
+                <span className="min-w-0 truncate">知识库：{selectedKnowledgeBaseText}</span>
               </div>
-              <div className="mt-8 flex w-full max-w-5xl flex-wrap justify-center gap-3">
-                {suggestions.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => setQuestion(item)}
-                    className="max-w-full rounded-xl bg-[#f5f5f5] px-4 py-3 text-sm text-[#222] transition hover:bg-[#eeeeee] sm:max-w-[calc(50%-0.75rem)] lg:max-w-full"
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
+              {!noKbSelected && (
+                <div className="mt-8 flex w-full max-w-5xl flex-wrap justify-center gap-3">
+                  {suggestions.map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      onClick={() => setQuestion(item)}
+                      className="max-w-full rounded-xl bg-[#f5f5f5] px-4 py-3 text-sm text-[#222] transition hover:bg-[#eeeeee] sm:max-w-[calc(50%-0.75rem)] lg:max-w-full"
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <div className="min-w-0 flex-1 space-y-6 py-8 pb-48">
@@ -365,31 +421,41 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
               }}
             />
           )}
-          <div className="rounded-[26px] border border-blue-200/80 bg-white/95 p-3 shadow-[0_18px_50px_rgba(37,99,235,0.12)] backdrop-blur transition focus-within:border-blue-400 focus-within:shadow-[0_22px_60px_rgba(37,99,235,0.18)]">
-            <div className="flex min-h-[78px] items-start gap-3">
+          <div className={cn(
+            "rounded-[26px] border bg-white/95 p-3 shadow-[0_18px_50px_rgba(37,99,235,0.12)] backdrop-blur transition",
+            noKbSelected
+              ? "border-[#e8e8e8] shadow-none"
+              : "border-blue-200/80 focus-within:border-blue-400 focus-within:shadow-[0_22px_60px_rgba(37,99,235,0.18)]"
+          )}>
+            <div className="flex min-h-[52px] items-start gap-3">
               <Textarea
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
-                placeholder="向选中的知识库提问..."
-                className="min-h-[58px] resize-none border-0 bg-transparent px-2 py-2 text-[15px] leading-7 text-[#1f1f1f] shadow-none placeholder:text-[#9aa3b2] focus-visible:ring-0"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    formRef.current?.requestSubmit()
+                  }
+                }}
+                placeholder={noKbSelected ? "请先选择知识库..." : "向选中的知识库提问..."}
+                disabled={noKbSelected}
+                className="min-h-[42px] resize-none border-0 bg-transparent px-2 py-2 text-[15px] leading-7 text-[#1f1f1f] shadow-none placeholder:text-[#9aa3b2] focus-visible:ring-0 disabled:cursor-not-allowed disabled:opacity-50"
               />
-              <Button
-                size="icon"
-                className="mt-1 h-9 w-9 shrink-0 rounded-full bg-blue-600 shadow-[0_8px_18px_rgba(37,99,235,0.28)] transition hover:bg-blue-700 disabled:bg-[#d9d9d9] disabled:shadow-none"
-                aria-label="发送"
-                disabled={loading}
-              >
-                <ArrowUp className="h-4 w-4" />
-              </Button>
             </div>
             <div className="mt-1 flex items-center gap-2">
               <ToolIconButton icon={<Paperclip className="h-5 w-5" />} label="添加附件" disabled />
-              <ToolIconButton icon={<Globe2 className="h-5 w-5" />} label="联网检索" disabled />
-              <div>
+              <ToolIconButton
+                icon={<Globe2 className="h-5 w-5" />}
+                label="联网检索"
+                active={onlineSearch}
+                disabled={noKbSelected}
+                onClick={() => setOnlineSearch((v) => !v)}
+              />
+              <div ref={kbTriggerRef}>
                 <ToolIconButton
                   icon={<Database className="h-5 w-5" />}
                   label="选择知识库"
-                  active={kbPickerOpen || selectedKbIds.length > 0}
+                  active={selectedKnowledgeBases.length > 0 || kbPickerOpen}
                   dataAttribute="kb-picker-trigger"
                   onClick={() => {
                     updateKbPickerPosition()
@@ -397,6 +463,18 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
                   }}
                 />
               </div>
+              <div className="flex-1" />
+              {question.trim() && !noKbSelected && (
+                <Button
+                  size="icon"
+                  className="h-9 w-9 shrink-0 rounded-full bg-blue-600 shadow-[0_8px_18px_rgba(37,99,235,0.28)] transition hover:bg-blue-700"
+                  aria-label={loading ? "中断" : "发送"}
+                  type={loading ? "button" : "submit"}
+                  onClick={loading ? stopQuestion : undefined}
+                >
+                  {loading ? <StopCircle className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />}
+                </Button>
+              )}
             </div>
           </div>
         </form>
@@ -531,7 +609,7 @@ function KnowledgeBaseSelector({
     return createPortal(
       <div
         data-kb-picker
-        className="fixed z-[9999] -translate-x-1/2 rounded-2xl border border-[#e5e7eb] bg-white p-3 text-sm text-[#9aa3b2] shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
+        className="fixed z-[9999] rounded-2xl border border-[#e5e7eb] bg-white p-3 text-sm text-[#9aa3b2] shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
         style={baseStyle}
       >
         暂无知识库
@@ -543,23 +621,48 @@ function KnowledgeBaseSelector({
   return createPortal(
     <div
       data-kb-picker
-      className="fixed z-[9999] grid max-h-[280px] -translate-x-1/2 gap-2 overflow-y-auto rounded-2xl border border-[#e5e7eb] bg-white p-3 shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
+      className="fixed z-[9999] rounded-2xl border border-[#e7e7e7] bg-white py-2 shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
       style={baseStyle}
     >
-      {knowledgeBases.map((knowledgeBase) => (
-        <label
-          key={knowledgeBase.id}
-          className="flex min-h-9 items-center gap-2 rounded-xl bg-[#f6f7fb] px-3 text-sm text-[#1f1f1f] transition hover:bg-[#eef2ff]"
-        >
-          <input
-            type="checkbox"
-            checked={selectedKbIds.includes(knowledgeBase.id)}
-            onChange={() => onToggle(knowledgeBase.id)}
-            className="h-3.5 w-3.5 accent-blue-600"
-          />
-          <span className="min-w-0 flex-1 truncate">{knowledgeBase.name}</span>
-        </label>
-      ))}
+      {knowledgeBases.map((knowledgeBase) => {
+        const isSelected = selectedKbIds.includes(knowledgeBase.id)
+        return (
+          <button
+            key={knowledgeBase.id}
+            type="button"
+            onClick={() => onToggle(knowledgeBase.id)}
+            className={cn(
+              "flex w-full items-center gap-2 px-3 py-1.5 text-left transition hover:bg-[#f5f5f5]",
+              isSelected && "bg-blue-50/50"
+            )}
+          >
+            <div className={cn(
+              "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+              isSelected ? "bg-blue-100 text-blue-600" : "bg-[#f0f0f0] text-[#888]"
+            )}>
+              <Database className="h-3.5 w-3.5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className={cn(
+                "text-sm font-medium",
+                isSelected ? "text-blue-700" : "text-[#1f1f1f]"
+              )}>
+                {knowledgeBase.name}
+              </div>
+              {knowledgeBase.description && (
+                <div className="truncate text-xs text-[#999]">
+                  {knowledgeBase.description}
+                </div>
+              )}
+            </div>
+            {isSelected && (
+              <svg className="h-4 w-4 shrink-0 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+          </button>
+        )
+      })}
     </div>,
     document.body
   )

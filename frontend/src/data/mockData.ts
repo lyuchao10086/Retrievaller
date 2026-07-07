@@ -19,6 +19,7 @@ export type MenuKey =
   | "upload"
   | "ocr"
   | "knowledge"
+  | "kbBuild"
   | "chat"
   | "qaRecords"
   | "citations"
@@ -29,7 +30,7 @@ export const menuItems = [
   { key: "dashboard" as const, label: "项目概览", icon: BarChart3 },
   { key: "upload" as const, label: "文档上传", icon: UploadCloud },
   { key: "ocr" as const, label: "OCR 解析", icon: ScanText },
-  { key: "knowledge" as const, label: "知识库构建", icon: Database },
+  { key: "kbBuild" as const, label: "知识库构建", icon: Database },
   { key: "chat" as const, label: "RAG 问答", icon: MessageSquareText },
   { key: "qaRecords" as const, label: "问答记录", icon: ClipboardCheck },
   { key: "citations" as const, label: "引用来源", icon: FileSearch },

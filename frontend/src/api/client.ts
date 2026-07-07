@@ -17,6 +17,7 @@ export class ApiError extends Error {
 
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown>
+  signal?: AbortSignal
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -31,7 +32,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
     headers,
-    body
+    body,
+    signal: options.signal
   })
 
   if (!response.ok) {

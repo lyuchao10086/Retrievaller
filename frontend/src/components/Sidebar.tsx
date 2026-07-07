@@ -3,12 +3,12 @@ import {
   BookOpen,
   ChevronRight,
   ClipboardCheck,
+  Database,
   Edit3,
   FileSearch,
   FileText,
   Grid2X2,
   History,
-  MessageCircle,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -25,6 +25,7 @@ import { deleteQaRecord, listQaRecords } from "@/api/ragApi"
 import type { MenuKey } from "@/data/mockData"
 import type { QaRecord } from "@/types/rag"
 import { cn } from "./ui/utils"
+import SearchModal from "./SearchModal"
 
 type SidebarProps = {
   active: MenuKey
@@ -36,18 +37,22 @@ type HistoryItem = {
   id: string
   title: string
   pinned: boolean
+  createdAt?: string
 }
 
 const HIDDEN_HISTORY_IDS_STORAGE_KEY = "retrievaller_hidden_qa_record_ids"
 
 export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
-  const [search, setSearch] = useState("")
+  const [moreFlyoutOpen, setMoreFlyoutOpen] = useState(false)
+  const [moreButtonRect, setMoreButtonRect] = useState<{ x: number; y: number; h: number } | null>(null)
+  const [searchModalOpen, setSearchModalOpen] = useState(false)
   const [histories, setHistories] = useState<HistoryItem[]>([])
   const [historyError, setHistoryError] = useState("")
   const [historyMenu, setHistoryMenu] = useState<{ id: string; x: number; y: number } | null>(null)
 
   const moreItems: Array<{ key: MenuKey; label: string; icon: typeof UploadCloud }> = [
+    { key: "kbBuild", label: "知识库构建", icon: Database },
     { key: "upload", label: "文档上传", icon: UploadCloud },
     { key: "ocr", label: "OCR 解析", icon: FileText },
     { key: "qaRecords", label: "问答记录", icon: ClipboardCheck },
@@ -56,17 +61,9 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
     { key: "settings", label: "设置", icon: Settings }
   ]
 
-  const query = search.trim().toLowerCase()
-  const filteredHistories = useMemo(
-    () =>
-      histories
-        .filter((history) => history.title.toLowerCase().includes(query))
-        .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
-    [histories, query]
-  )
-  const filteredMoreItems = useMemo(
-    () => moreItems.filter((item) => item.label.toLowerCase().includes(query)),
-    [moreItems, query]
+  const sortedHistories = useMemo(
+    () => histories.sort((a, b) => Number(b.pinned) - Number(a.pinned)),
+    [histories]
   )
 
   useEffect(() => {
@@ -94,20 +91,23 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   }, [])
 
   useEffect(() => {
-    if (!historyMenu && !moreMenuOpen) return
+    if (!historyMenu && !moreMenuOpen && !moreFlyoutOpen) return
 
     const closeMenu = (event: MouseEvent) => {
       const target = event.target as HTMLElement
       if (target.closest("[data-history-menu]")) return
       if (target.closest("[data-more-menu]")) return
+      if (target.closest("[data-more-flyout]")) return
       if (target.closest("[data-more-trigger]")) return
       setHistoryMenu(null)
       setMoreMenuOpen(false)
+      setMoreFlyoutOpen(false)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setHistoryMenu(null)
         setMoreMenuOpen(false)
+        setMoreFlyoutOpen(false)
       }
     }
 
@@ -118,6 +118,17 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
       window.removeEventListener("keydown", closeOnEscape)
     }
   }, [historyMenu, moreMenuOpen])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "k") {
+        event.preventDefault()
+        setSearchModalOpen((v) => !v)
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [])
 
   async function deleteHistory(historyId: string) {
     try {
@@ -137,21 +148,15 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   return (
     <aside className="sticky top-0 z-40 hidden h-screen w-[280px] shrink-0 overflow-visible border-r border-[#e8e8e8] bg-[#f7f7f7] text-[#1f1f1f] lg:flex lg:flex-col">
       <div className="p-3">
-        <div className="mb-3 flex items-center gap-2 rounded-lg border border-[#dedede] bg-[#f2f2f2] px-3 py-2 text-[#999] transition hover:border-[#d0d0d0] hover:bg-[#e9e9e9] focus-within:border-[#c8c8c8] focus-within:bg-white">
+        <button
+          type="button"
+          onClick={() => setSearchModalOpen(true)}
+          className="mb-3 flex w-full items-center gap-2 rounded-lg border border-[#dedede] bg-[#f2f2f2] px-3 py-2 text-[#999] transition hover:border-[#d0d0d0] hover:bg-[#e9e9e9]"
+        >
           <Search className="h-4 w-4" />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && filteredMoreItems[0]) {
-                onChange(filteredMoreItems[0].key)
-              }
-            }}
-            placeholder="搜索..."
-            className="min-w-0 flex-1 bg-transparent text-sm text-[#333] outline-none placeholder:text-[#999]"
-          />
+          <span className="min-w-0 flex-1 text-left text-sm">搜索...</span>
           <span className="text-xs">⌘ K</span>
-        </div>
+        </button>
 
         <button
           type="button"
@@ -196,25 +201,34 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           <button
             type="button"
             data-more-trigger
-            onClick={() => setMoreMenuOpen((value) => !value)}
+            onClick={(event) => {
+              setMoreMenuOpen((value) => !value)
+              setMoreFlyoutOpen(false)
+              const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+              setMoreButtonRect({ x: rect.right, y: rect.top, h: rect.height })
+            }}
+            onMouseEnter={(event) => {
+              if (moreMenuOpen) return
+              const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+              setMoreButtonRect({ x: rect.right, y: rect.top, h: rect.height })
+              setMoreFlyoutOpen(true)
+            }}
+            onMouseLeave={() => setMoreFlyoutOpen(false)}
             className={cn(
               "flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm font-medium transition hover:bg-[#eeeeee]",
-              moreMenuOpen && "bg-[#eeeeee]"
+              (moreMenuOpen || moreFlyoutOpen) && "bg-[#eeeeee]"
             )}
           >
-            <span className="flex items-center gap-2">
+            <span className={cn("flex items-center gap-2", moreMenuOpen && "text-[#999]")}>
               <Grid2X2 className="h-4 w-4" />
-              更多
+              {moreMenuOpen ? "收起" : "更多"}
             </span>
             <ChevronRight className={cn("h-4 w-4 text-[#999] transition", moreMenuOpen && "rotate-90")} />
           </button>
 
           {moreMenuOpen && (
-            <div
-              data-more-menu
-              className="mt-1 space-y-1 rounded-xl border border-[#e7e7e7] bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.10)]"
-            >
-              {(query ? filteredMoreItems : moreItems).map((item) => {
+            <div data-more-menu className="space-y-0.5">
+              {moreItems.map((item) => {
                 const Icon = item.icon
                 return (
                   <button
@@ -222,7 +236,37 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
                     type="button"
                     onClick={() => {
                       onChange(item.key)
-                      setMoreMenuOpen(false)
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium transition",
+                      active === item.key ? "bg-white shadow-sm font-semibold text-[#111]" : "text-[#444] hover:bg-white"
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {item.label}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {moreFlyoutOpen && moreButtonRect && (
+            <div
+              data-more-flyout
+              className="fixed z-[9999] w-[160px] rounded-xl border border-[#e7e7e7] bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.10)]"
+              style={{ left: moreButtonRect.x + 4, top: moreButtonRect.y }}
+              onMouseEnter={() => setMoreFlyoutOpen(true)}
+              onMouseLeave={() => setMoreFlyoutOpen(false)}
+            >
+              {moreItems.map((item) => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => {
+                      onChange(item.key)
+                      setMoreFlyoutOpen(false)
                     }}
                     className={cn(
                       "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition hover:bg-[#f5f5f5]",
@@ -234,9 +278,6 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
                   </button>
                 )
               })}
-              {query && filteredMoreItems.length === 0 && (
-                <div className="px-3 py-2 text-xs text-[#999]">未找到匹配功能</div>
-              )}
             </div>
           )}
         </nav>
@@ -248,7 +289,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           历史对话
         </div>
         <div className="space-y-1">
-          {filteredHistories.map((history) => (
+          {sortedHistories.map((history) => (
             <div
               key={history.id}
               className={cn(
@@ -259,12 +300,9 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
               <button
                 type="button"
                 onClick={() => onChange("chat")}
-                className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+                className="min-w-0 flex-1 truncate px-2 py-1.5 text-left"
               >
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[#dddddd] bg-white text-[#9b9b9b]">
-                  <MessageCircle className="h-3 w-3" />
-                </span>
-                <span className="min-w-0 flex-1 truncate">{history.title}</span>
+                {history.title}
               </button>
               <div className="relative mr-1 h-7 w-7 shrink-0">
                 {history.pinned && (
@@ -307,9 +345,9 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           {historyError && (
             <div className="rounded-lg px-2 py-2 text-xs text-red-500">历史加载失败：{historyError}</div>
           )}
-          {!historyError && filteredHistories.length === 0 && (
+          {!historyError && sortedHistories.length === 0 && (
             <div className="rounded-lg px-2 py-2 text-xs text-[#999]">
-              {query ? "没有匹配的历史对话" : "暂无历史对话"}
+              暂无历史对话
             </div>
           )}
         </div>
@@ -363,6 +401,14 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
         <span className="text-sm font-medium">用户662680</span>
         <ChevronRight className="ml-auto h-4 w-4 text-[#aaa]" />
       </button>
+
+      <SearchModal
+        open={searchModalOpen}
+        onClose={() => setSearchModalOpen(false)}
+        histories={sortedHistories}
+        onNewChat={() => onChange("chat")}
+        onSelectHistory={() => onChange("chat")}
+      />
     </aside>
   )
 }
@@ -403,7 +449,8 @@ function mergeHistoryPins(records: QaRecord[], current: HistoryItem[]) {
   return records.map((record) => ({
     id: record.id,
     title: formatHistoryTitle(record),
-    pinned: pinnedById.get(record.id) ?? false
+    pinned: pinnedById.get(record.id) ?? false,
+    createdAt: record.created_at
   }))
 }
 
