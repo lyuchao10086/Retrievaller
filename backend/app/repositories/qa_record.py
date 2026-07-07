@@ -22,6 +22,13 @@ class QaRecordRepository(Protocol):
     ) -> QaRecord | None:
         raise NotImplementedError
 
+    async def delete_by_id_and_user(
+        self,
+        qa_record_id: str,
+        user_id: str,
+    ) -> QaRecord | None:
+        raise NotImplementedError
+
 
 class MySQLQaRecordRepository:
     """问答记录持久化的 MySQL 实现。"""
@@ -116,6 +123,40 @@ class MySQLQaRecordRepository:
         if row is None:
             return None
         return self._from_row(row)
+
+    async def delete_by_id_and_user(
+        self,
+        qa_record_id: str,
+        user_id: str,
+    ) -> QaRecord | None:
+        """硬删除当前用户的问答记录，并先清理对应评估结果。"""
+        record = await self.get_by_id_and_user(qa_record_id, user_id)
+        if record is None:
+            return None
+
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                DELETE FROM evaluations
+                WHERE qa_record_id = %s
+                  AND user_id = %s
+                """,
+                (qa_record_id, user_id),
+            )
+            await cursor.execute(
+                """
+                DELETE FROM qa_records
+                WHERE id = %s
+                  AND user_id = %s
+                """,
+                (qa_record_id, user_id),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+
+        if affected_rows == 0:
+            return None
+        return record
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> QaRecord:

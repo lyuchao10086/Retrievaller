@@ -30,6 +30,12 @@ export function listQaRecords() {
   return request<QaRecord[]>("/api/rag/records")
 }
 
+export function deleteQaRecord(qaRecordId: string) {
+  return request<QaRecord>(`/api/rag/records/${qaRecordId}`, {
+    method: "DELETE"
+  })
+}
+
 export function createRagSuggestions(payload: RagSuggestionsRequest) {
   return request<RagSuggestionsResponse>("/api/rag/suggestions", {
     method: "POST",

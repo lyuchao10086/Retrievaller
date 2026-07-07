@@ -285,7 +285,7 @@ export default function KnowledgeBasePage() {
               </Button>
               <Button variant="destructive" onClick={() => void submitDelete()} disabled={loading || !selectedKb}>
                 <Trash2 className="h-4 w-4" />
-                软删除
+                删除
               </Button>
             </div>
           </CardContent>

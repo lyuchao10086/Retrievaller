@@ -75,18 +75,9 @@ async def delete_knowledge_base(
     kb_id: str,
     user_id: str = DEFAULT_USER_ID,
 ) -> KnowledgeBase | None:
-    """软删除当前逻辑用户可见的 active 知识库。
-
-    软删除只改变知识库状态，不物理删除数据库记录，也不触碰 MinIO 和 Milvus。
-    这样后续可以做审计、恢复或异步资源清理。
-    """
+    """硬删除当前逻辑用户可见的 active 知识库。"""
     existing = await repository.get_active_by_id_and_user(kb_id, user_id)
     if existing is None:
         return None
 
-    deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    return await repository.soft_delete_active_by_id_and_user(
-        kb_id,
-        user_id,
-        deleted_at,
-    )
+    return await repository.delete_active_by_id_and_user(kb_id, user_id)

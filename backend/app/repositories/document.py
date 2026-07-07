@@ -27,12 +27,11 @@ class DocumentRepository(Protocol):
     ) -> Document | None:
         raise NotImplementedError
 
-    async def soft_delete_by_id_and_knowledge_base(
+    async def delete_by_id_and_knowledge_base(
         self,
         user_id: str,
         knowledge_base_id: str,
         document_id: str,
-        deleted_at: datetime,
     ) -> Document | None:
         raise NotImplementedError
 
@@ -217,39 +216,50 @@ class MySQLDocumentRepository:
             return None
         return self._from_row(row)
 
-    async def soft_delete_by_id_and_knowledge_base(
+    async def delete_by_id_and_knowledge_base(
         self,
         user_id: str,
         knowledge_base_id: str,
         document_id: str,
-        deleted_at: datetime,
     ) -> Document | None:
-        """软删除指定知识库下的文档元数据。
+        """硬删除指定知识库下的文档元数据。
 
-        这里只更新 documents 表，不删除 MinIO 原始文件、Milvus 向量或未来的 chunk。
+        chunks 表通过 document_id 外键依赖 documents，所以先删 chunks，
+        再删 documents 主记录。
         """
+        document = await self.get_by_id_and_knowledge_base(
+            user_id,
+            knowledge_base_id,
+            document_id,
+        )
+        if document is None:
+            return None
+
         async with self.connection.cursor() as cursor:
             await cursor.execute(
                 """
-                UPDATE documents
-                SET status = 'deleted', updated_at = %s
+                DELETE FROM chunks
+                WHERE document_id = %s
+                  AND user_id = %s
+                  AND knowledge_base_id = %s
+                """,
+                (document_id, user_id, knowledge_base_id),
+            )
+            await cursor.execute(
+                """
+                DELETE FROM documents
                 WHERE id = %s
                   AND user_id = %s
                   AND knowledge_base_id = %s
-                  AND status != 'deleted'
                 """,
-                (deleted_at, document_id, user_id, knowledge_base_id),
+                (document_id, user_id, knowledge_base_id),
             )
             affected_rows = cursor.rowcount
         await self.connection.commit()
 
         if affected_rows == 0:
             return None
-        return await self._get_by_id_and_knowledge_base_including_deleted(
-            user_id,
-            knowledge_base_id,
-            document_id,
-        )
+        return document
 
     async def update_status_by_id_and_knowledge_base(
         self,
@@ -456,43 +466,6 @@ class MySQLDocumentRepository:
             )
             rows = await cursor.fetchall()
         return [self._from_row(row) for row in rows]
-
-    async def _get_by_id_and_knowledge_base_including_deleted(
-        self,
-        user_id: str,
-        knowledge_base_id: str,
-        document_id: str,
-    ) -> Document | None:
-        """查询文档记录本身，用于返回刚刚软删除后的对象。"""
-        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
-            await cursor.execute(
-                """
-                SELECT
-                    id,
-                    user_id,
-                    knowledge_base_id,
-                    file_name,
-                    file_type,
-                    file_size,
-                    storage_bucket,
-                    storage_object_key,
-                    status,
-                    error_message,
-                    parsed_bucket,
-                    parsed_object_key,
-                    task_id,
-                    created_at,
-                    updated_at
-                FROM documents
-                WHERE id = %s AND user_id = %s AND knowledge_base_id = %s
-                LIMIT 1
-                """,
-                (document_id, user_id, knowledge_base_id),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._from_row(row)
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> Document:

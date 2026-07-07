@@ -29,6 +29,7 @@ from app.services.document import (
     STATUS_MUST_BE_UPLOADED_MESSAGE,
     UPLOADED_STATUS,
     delete_document,
+    delete_document_storage_objects,
     get_document_by_id,
     get_parsed_document_content,
     list_documents_by_knowledge_base,
@@ -458,10 +459,15 @@ async def delete_document_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    vector_service: Annotated[
+        VectorService,
+        Depends(get_vector_service),
+    ],
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)],
 ) -> DocumentResponse:
-    """软删除指定知识库下的文档元数据。
+    """硬删除指定知识库下的文档元数据。
 
-    这里只更新 documents.status，不删除 MinIO 文件、Milvus 向量或 chunk。
+    当前阶段同步物理清理 Milvus 向量，再删除 MySQL 文档记录和该文档的 chunks。
     """
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
         kb_id,
@@ -473,6 +479,19 @@ async def delete_document_api(
             detail="Knowledge base not found",
         )
 
+    document = await get_document_by_id(document_repository, kb_id, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        )
+
+    await delete_document_storage_objects(storage, document)
+    vector_service.delete_chunk_embeddings_by_document(
+        DEFAULT_USER_ID,
+        kb_id,
+        document_id,
+    )
     document = await delete_document(document_repository, kb_id, document_id)
     if document is None:
         raise HTTPException(

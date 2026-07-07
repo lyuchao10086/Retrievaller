@@ -21,8 +21,7 @@ import {
   UserRound
 } from "lucide-react"
 import { ApiError } from "@/api/client"
-import { listQaRecords } from "@/api/ragApi"
-import retrievallerAvatar from "@/assets/retrievaller-avatar.png"
+import { deleteQaRecord, listQaRecords } from "@/api/ragApi"
 import type { MenuKey } from "@/data/mockData"
 import type { QaRecord } from "@/types/rag"
 import { cn } from "./ui/utils"
@@ -39,9 +38,10 @@ type HistoryItem = {
   pinned: boolean
 }
 
+const HIDDEN_HISTORY_IDS_STORAGE_KEY = "retrievaller_hidden_qa_record_ids"
+
 export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
-  const [moreExpanded, setMoreExpanded] = useState(false)
   const [search, setSearch] = useState("")
   const [histories, setHistories] = useState<HistoryItem[]>([])
   const [historyError, setHistoryError] = useState("")
@@ -76,7 +76,8 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
       try {
         const records = await listQaRecords()
         if (!ignore) {
-          setHistories((current) => mergeHistoryPins(records, current))
+          const hiddenIds = readHiddenHistoryIds()
+          setHistories((current) => mergeHistoryPins(records, current).filter((history) => !hiddenIds.has(history.id)))
           setHistoryError("")
         }
       } catch (unknownError) {
@@ -93,15 +94,21 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   }, [])
 
   useEffect(() => {
-    if (!historyMenu) return
+    if (!historyMenu && !moreMenuOpen) return
 
     const closeMenu = (event: MouseEvent) => {
       const target = event.target as HTMLElement
       if (target.closest("[data-history-menu]")) return
+      if (target.closest("[data-more-menu]")) return
+      if (target.closest("[data-more-trigger]")) return
       setHistoryMenu(null)
+      setMoreMenuOpen(false)
     }
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setHistoryMenu(null)
+      if (event.key === "Escape") {
+        setHistoryMenu(null)
+        setMoreMenuOpen(false)
+      }
     }
 
     window.addEventListener("click", closeMenu)
@@ -110,7 +117,18 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
       window.removeEventListener("click", closeMenu)
       window.removeEventListener("keydown", closeOnEscape)
     }
-  }, [historyMenu])
+  }, [historyMenu, moreMenuOpen])
+
+  async function deleteHistory(historyId: string) {
+    try {
+      await deleteQaRecord(historyId)
+      hideHistoryId(historyId)
+      setHistories((current) => current.filter((history) => history.id !== historyId))
+      setHistoryError("")
+    } catch (unknownError) {
+      setHistoryError(readErrorMessage(unknownError))
+    }
+  }
 
   if (collapsed) {
     return null
@@ -143,7 +161,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           )}
           onClick={() => onChange("dashboard")}
         >
-          <img src={retrievallerAvatar} alt="" className="h-7 w-7 rounded-full object-cover" />
+          <img src="/favicon.svg?v=search" alt="" className="h-7 w-7 rounded-lg object-cover" />
           <span className="flex-1 text-sm font-semibold">Retrievaller</span>
         </button>
 
@@ -175,28 +193,39 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
             知识库
           </button>
 
-          {moreExpanded ? (
-            <div className="space-y-1">
-              <button
-                type="button"
-                onClick={() => setMoreExpanded(false)}
-                className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm text-[#999] transition hover:bg-[#eeeeee] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-              >
-                <span className="flex items-center gap-2">
-                  <Grid2X2 className="h-4 w-4 text-[#111]" />
-                  收起
-                </span>
-                <ChevronRight className="h-4 w-4 rotate-90 text-[#999]" />
-              </button>
+          <button
+            type="button"
+            data-more-trigger
+            onClick={() => setMoreMenuOpen((value) => !value)}
+            className={cn(
+              "flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm font-medium transition hover:bg-[#eeeeee]",
+              moreMenuOpen && "bg-[#eeeeee]"
+            )}
+          >
+            <span className="flex items-center gap-2">
+              <Grid2X2 className="h-4 w-4" />
+              更多
+            </span>
+            <ChevronRight className={cn("h-4 w-4 text-[#999] transition", moreMenuOpen && "rotate-90")} />
+          </button>
+
+          {moreMenuOpen && (
+            <div
+              data-more-menu
+              className="mt-1 space-y-1 rounded-xl border border-[#e7e7e7] bg-white p-2 shadow-[0_10px_28px_rgba(15,23,42,0.10)]"
+            >
               {(query ? filteredMoreItems : moreItems).map((item) => {
                 const Icon = item.icon
                 return (
                   <button
                     key={item.key}
                     type="button"
-                    onClick={() => onChange(item.key)}
+                    onClick={() => {
+                      onChange(item.key)
+                      setMoreMenuOpen(false)
+                    }}
                     className={cn(
-                      "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm transition hover:bg-[#eeeeee]",
+                      "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition hover:bg-[#f5f5f5]",
                       active === item.key ? "font-semibold text-[#111]" : "text-[#444]"
                     )}
                   >
@@ -207,58 +236,6 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
               })}
               {query && filteredMoreItems.length === 0 && (
                 <div className="px-3 py-2 text-xs text-[#999]">未找到匹配功能</div>
-              )}
-            </div>
-          ) : (
-            <div
-              className="relative"
-              onMouseEnter={() => setMoreMenuOpen(true)}
-              onMouseLeave={() => setMoreMenuOpen(false)}
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  setMoreExpanded(true)
-                  setMoreMenuOpen(false)
-                }}
-                className={cn(
-                  "flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm font-medium transition hover:bg-[#eeeeee]",
-                  moreMenuOpen && "bg-[#eeeeee]"
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <Grid2X2 className="h-4 w-4" />
-                  更多
-                </span>
-                <ChevronRight className="h-4 w-4 text-[#999]" />
-              </button>
-
-              {moreMenuOpen && (
-                <div className="absolute left-[calc(100%+10px)] top-0 z-[9999] w-[190px] rounded-xl border border-[#e7e7e7] bg-white p-2 shadow-[0_12px_35px_rgba(15,23,42,0.14)]">
-                  {(query ? filteredMoreItems : moreItems).map((item) => {
-                    const Icon = item.icon
-                    return (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => {
-                          onChange(item.key)
-                          setMoreMenuOpen(false)
-                        }}
-                        className={cn(
-                          "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition hover:bg-[#f5f5f5]",
-                          active === item.key ? "font-semibold text-[#111]" : "text-[#444]"
-                        )}
-                      >
-                        <Icon className="h-4 w-4" />
-                        {item.label}
-                      </button>
-                    )
-                  })}
-                  {query && filteredMoreItems.length === 0 && (
-                    <div className="px-3 py-2 text-xs text-[#999]">未找到匹配功能</div>
-                  )}
-                </div>
               )}
             </div>
           )}
@@ -367,8 +344,9 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
             label="删除"
             danger
             onClick={() => {
-              setHistories((current) => current.filter((history) => history.id !== historyMenu.id))
+              const historyId = historyMenu.id
               setHistoryMenu(null)
+              void deleteHistory(historyId)
             }}
           />
         </div>
@@ -427,6 +405,22 @@ function mergeHistoryPins(records: QaRecord[], current: HistoryItem[]) {
     title: formatHistoryTitle(record),
     pinned: pinnedById.get(record.id) ?? false
   }))
+}
+
+function readHiddenHistoryIds() {
+  try {
+    const rawValue = window.localStorage.getItem(HIDDEN_HISTORY_IDS_STORAGE_KEY)
+    const parsedValue = rawValue ? JSON.parse(rawValue) : []
+    return new Set(Array.isArray(parsedValue) ? parsedValue.map(String) : [])
+  } catch {
+    return new Set<string>()
+  }
+}
+
+function hideHistoryId(historyId: string) {
+  const hiddenIds = readHiddenHistoryIds()
+  hiddenIds.add(historyId)
+  window.localStorage.setItem(HIDDEN_HISTORY_IDS_STORAGE_KEY, JSON.stringify([...hiddenIds]))
 }
 
 function formatHistoryTitle(record: QaRecord) {

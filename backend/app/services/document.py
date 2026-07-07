@@ -174,10 +174,7 @@ async def delete_document(
     document_id: str,
     user_id: str = DEFAULT_USER_ID,
 ) -> Document | None:
-    """软删除当前逻辑用户在指定知识库下的文档记录。
-
-    只把 documents.status 改为 deleted，不删除 MinIO 文件、Milvus 向量或 chunk。
-    """
+    """硬删除当前逻辑用户在指定知识库下的文档记录。"""
     existing = await document_repository.get_by_id_and_knowledge_base(
         user_id,
         kb_id,
@@ -186,13 +183,27 @@ async def delete_document(
     if existing is None:
         return None
 
-    deleted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    return await document_repository.soft_delete_by_id_and_knowledge_base(
+    return await document_repository.delete_by_id_and_knowledge_base(
         user_id,
         kb_id,
         document_id,
-        deleted_at,
     )
+
+
+async def delete_document_storage_objects(
+    storage: DocumentStorage,
+    document: Document,
+) -> None:
+    """物理删除文档在对象存储中的原始文件和解析结果。"""
+    await storage.delete_object(
+        document.storage_bucket,
+        document.storage_object_key,
+    )
+    if document.parsed_bucket and document.parsed_object_key:
+        await storage.delete_object(
+            document.parsed_bucket,
+            document.parsed_object_key,
+        )
 
 
 async def parse_document(

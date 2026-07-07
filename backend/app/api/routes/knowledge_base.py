@@ -2,8 +2,11 @@ from typing import Annotated
 
 import aiomysql
 from fastapi import APIRouter, Depends, HTTPException, status
+from minio import Minio
 
+from app.core.config import Settings, get_settings
 from app.core.database import get_db_connection
+from app.repositories.document import DocumentRepository, MySQLDocumentRepository
 from app.repositories.knowledge_base import (
     KnowledgeBaseRepository,
     MySQLKnowledgeBaseRepository,
@@ -14,12 +17,19 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseUpdate,
 )
 from app.services.knowledge_base import (
+    DEFAULT_USER_ID,
     create_knowledge_base,
     delete_knowledge_base,
     get_knowledge_base,
     list_knowledge_bases,
     update_knowledge_base,
 )
+from app.services.document import (
+    delete_document_storage_objects,
+    list_documents_by_knowledge_base,
+)
+from app.services.document_storage import DocumentStorage, MinIODocumentStorage
+from app.services.vector_service import MilvusVectorService, VectorService
 
 
 router = APIRouter(prefix="/api/knowledge-bases", tags=["knowledge-bases"])
@@ -30,6 +40,36 @@ async def get_knowledge_base_repository(
 ) -> KnowledgeBaseRepository:
     """将当前请求的 MySQL 连接包装成 repository 实例。"""
     return MySQLKnowledgeBaseRepository(connection)
+
+
+async def get_document_repository(
+    connection: Annotated[aiomysql.Connection, Depends(get_db_connection)],
+) -> DocumentRepository:
+    """删除知识库前需要读取其下文档对象位置，用于清理 MinIO。"""
+    return MySQLDocumentRepository(connection)
+
+
+def get_document_storage(settings: Annotated[Settings, Depends(get_settings)]) -> DocumentStorage:
+    """创建 MinIO 存储适配器，用于知识库删除时清理文件对象。"""
+    client = Minio(
+        endpoint=settings.minio_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_secure,
+    )
+    return MinIODocumentStorage(client)
+
+
+def get_vector_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> VectorService:
+    """创建 Milvus 向量服务；删除知识库时需要同步清理该知识库向量。"""
+    return MilvusVectorService(
+        host=settings.milvus_host,
+        port=settings.milvus_port,
+        collection_name=settings.milvus_collection_document_chunks,
+        embedding_dimension=settings.embedding_dimension,
+    )
 
 
 @router.post(
@@ -108,8 +148,31 @@ async def delete_knowledge_base_api(
         KnowledgeBaseRepository,
         Depends(get_knowledge_base_repository),
     ],
+    vector_service: Annotated[
+        VectorService,
+        Depends(get_vector_service),
+    ],
+    document_repository: Annotated[
+        DocumentRepository,
+        Depends(get_document_repository),
+    ],
+    storage: Annotated[DocumentStorage, Depends(get_document_storage)],
 ) -> KnowledgeBaseResponse:
-    """软删除默认用户可见的 active 知识库，查不到时返回 404。"""
+    """硬删除默认用户可见的 active 知识库，查不到时返回 404。"""
+    knowledge_base = await get_knowledge_base(repository, kb_id)
+    if knowledge_base is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Knowledge base not found",
+        )
+
+    documents = await list_documents_by_knowledge_base(document_repository, kb_id)
+    for document in documents:
+        await delete_document_storage_objects(storage, document)
+    vector_service.delete_chunk_embeddings_by_knowledge_base(
+        DEFAULT_USER_ID,
+        kb_id,
+    )
     knowledge_base = await delete_knowledge_base(repository, kb_id)
     if knowledge_base is None:
         raise HTTPException(

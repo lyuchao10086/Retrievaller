@@ -70,5 +70,14 @@ async def list_qa_records(
     return await repository.list_recent_by_user(user_id, limit)
 
 
+async def delete_qa_record(
+    repository: QaRecordRepository,
+    qa_record_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> QaRecord | None:
+    """硬删除当前用户的一条 RAG 问答记录。"""
+    return await repository.delete_by_id_and_user(qa_record_id, user_id)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)

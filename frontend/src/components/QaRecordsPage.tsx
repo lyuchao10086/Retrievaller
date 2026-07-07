@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react"
-import { Eye, FileSearch, RefreshCw, ShieldCheck, Sparkles } from "lucide-react"
+import { Eye, FileSearch, RefreshCw, ShieldCheck, Sparkles, Trash2 } from "lucide-react"
 import { ApiError } from "@/api/client"
 import { evaluateQaRecord, getQaRecordEvaluation } from "@/api/evaluationApi"
-import { listQaRecords } from "@/api/ragApi"
+import { deleteQaRecord, listQaRecords } from "@/api/ragApi"
 import type { Evaluation } from "@/types/evaluation"
 import type { MultiRagSource, QaRecord } from "@/types/rag"
 import PageHeader from "./PageHeader"
@@ -73,6 +73,23 @@ export default function QaRecordsPage() {
       } else {
         setError(readErrorMessage(unknownError))
       }
+    } finally {
+      setWorkingId(null)
+    }
+  }
+
+  async function removeRecord(record: QaRecord) {
+    if (!window.confirm(`确认删除问答记录「${record.title || record.question}」？`)) return
+    setWorkingId(record.id)
+    setError("")
+    setMessage("")
+    try {
+      await deleteQaRecord(record.id)
+      setRecords((current) => current.filter((item) => item.id !== record.id))
+      setDialog((current) => (current?.kind === "sources" && current.record.id === record.id ? null : current))
+      setMessage("问答记录已删除")
+    } catch (unknownError) {
+      setError(readErrorMessage(unknownError))
     } finally {
       setWorkingId(null)
     }
@@ -162,6 +179,9 @@ export default function QaRecordsPage() {
                         <Button size="sm" variant="outline" onClick={() => void viewEvaluation(record)} disabled={workingId === record.id}>
                           <ShieldCheck className="h-4 w-4" />
                           评估结果
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => void removeRecord(record)} disabled={workingId === record.id}>
+                          <Trash2 className="h-4 w-4 text-red-600" />
                         </Button>
                       </div>
                     </TableCell>

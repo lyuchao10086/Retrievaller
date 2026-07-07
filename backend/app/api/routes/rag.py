@@ -34,7 +34,12 @@ from app.services.rag_service import (
     answer_multi_knowledge_base_question,
     answer_single_knowledge_base_question,
 )
-from app.services.qa_record import create_qa_record, generate_qa_record_title, list_qa_records
+from app.services.qa_record import (
+    create_qa_record,
+    delete_qa_record,
+    generate_qa_record_title,
+    list_qa_records,
+)
 from app.services.vector_service import MilvusVectorService, VectorService
 
 
@@ -248,6 +253,24 @@ async def list_rag_qa_records_api(
     """查询 default_user 最近 50 条 RAG 问答记录。"""
     records = await list_qa_records(qa_record_repository)
     return [QaRecordResponse.model_validate(record) for record in records]
+
+
+@multi_router.delete("/records/{qa_record_id}", response_model=QaRecordResponse)
+async def delete_rag_qa_record_api(
+    qa_record_id: str,
+    qa_record_repository: Annotated[
+        QaRecordRepository,
+        Depends(get_qa_record_repository),
+    ],
+) -> QaRecordResponse:
+    """硬删除 default_user 的一条 RAG 问答记录。"""
+    record = await delete_qa_record(qa_record_repository, qa_record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Qa record not found",
+        )
+    return QaRecordResponse.model_validate(record)
 
 
 @multi_router.post("/suggestions", response_model=RagSuggestionsResponse)

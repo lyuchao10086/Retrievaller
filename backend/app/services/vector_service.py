@@ -50,6 +50,21 @@ class VectorService(Protocol):
     ) -> list[VectorSearchResult]:
         raise NotImplementedError
 
+    def delete_chunk_embeddings_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        raise NotImplementedError
+
+    def delete_chunk_embeddings_by_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+    ) -> None:
+        raise NotImplementedError
+
 
 class MilvusVectorService:
     """Milvus document_chunks collection 写入实现。"""
@@ -182,6 +197,32 @@ class MilvusVectorService:
             )
         return search_results
 
+    def delete_chunk_embeddings_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> None:
+        """从 Milvus 物理删除某个文档对应的 chunk 向量。"""
+        expr = (
+            f'user_id == "{_escape_expr_value(user_id)}" '
+            f'&& knowledge_base_id == "{_escape_expr_value(knowledge_base_id)}" '
+            f'&& document_id == "{_escape_expr_value(document_id)}"'
+        )
+        self._delete_by_expr(expr)
+
+    def delete_chunk_embeddings_by_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+    ) -> None:
+        """从 Milvus 物理删除某个知识库对应的所有 chunk 向量。"""
+        expr = (
+            f'user_id == "{_escape_expr_value(user_id)}" '
+            f'&& knowledge_base_id == "{_escape_expr_value(knowledge_base_id)}"'
+        )
+        self._delete_by_expr(expr)
+
     def _get_or_create_collection(self):
         """确保 Milvus collection 存在，并返回 collection 对象。"""
         from pymilvus import (
@@ -239,6 +280,12 @@ class MilvusVectorService:
         )
         collection.load()
         return collection
+
+    def _delete_by_expr(self, expr: str) -> None:
+        """按 Milvus 表达式删除向量实体。"""
+        collection = self._get_or_create_collection()
+        collection.delete(expr)
+        collection.flush()
 
 
 def _escape_expr_value(value: str) -> str:

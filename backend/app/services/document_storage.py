@@ -23,6 +23,9 @@ class DocumentStorage(Protocol):
     async def get_object(self, bucket_name: str, object_key: str) -> bytes:
         raise NotImplementedError
 
+    async def delete_object(self, bucket_name: str, object_key: str) -> None:
+        raise NotImplementedError
+
 
 class MinIODocumentStorage:
     """MinIO 对象存储实现，用于保存上传的原始文件。"""
@@ -65,3 +68,11 @@ class MinIODocumentStorage:
         finally:
             response.close()
             response.release_conn()
+
+    async def delete_object(self, bucket_name: str, object_key: str) -> None:
+        """从 MinIO 删除对象。S3 删除本身是幂等操作，对象不存在也视为已删除。"""
+        await asyncio.to_thread(
+            self.client.remove_object,
+            bucket_name,
+            object_key,
+        )

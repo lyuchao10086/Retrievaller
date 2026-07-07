@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useMemo, useState } from "react"
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import {
   ArrowUp,
   Bot,
@@ -59,8 +60,10 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
   const [suggestions, setSuggestions] = useState(DEFAULT_SUGGESTIONS)
   const [kbPickerOpen, setKbPickerOpen] = useState(false)
+  const [kbPickerPosition, setKbPickerPosition] = useState({ left: 0, bottom: 0, width: 360 })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+  const formRef = useRef<HTMLFormElement | null>(null)
 
   const selectedKnowledgeBases = useMemo(
     () => knowledgeBases.filter((item) => selectedKbIds.includes(item.id)),
@@ -126,6 +129,39 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
       ignore = true
     }
   }, [selectedKnowledgeBases])
+
+  const updateKbPickerPosition = () => {
+    const rect = formRef.current?.getBoundingClientRect()
+    if (!rect) return
+
+    setKbPickerPosition({
+      left: rect.left + rect.width / 2,
+      bottom: Math.max(16, window.innerHeight - rect.top + 12),
+      width: Math.min(360, window.innerWidth - 32)
+    })
+  }
+
+  useEffect(() => {
+    if (!kbPickerOpen) return
+
+    updateKbPickerPosition()
+    window.addEventListener("resize", updateKbPickerPosition)
+    window.addEventListener("scroll", updateKbPickerPosition, true)
+
+    const closePicker = (event: MouseEvent) => {
+      const target = event.target as HTMLElement
+      if (target.closest("[data-kb-picker]")) return
+      if (target.closest("[data-kb-picker-trigger]")) return
+      setKbPickerOpen(false)
+    }
+
+    window.addEventListener("click", closePicker)
+    return () => {
+      window.removeEventListener("resize", updateKbPickerPosition)
+      window.removeEventListener("scroll", updateKbPickerPosition, true)
+      window.removeEventListener("click", closePicker)
+    }
+  }, [kbPickerOpen])
 
   const sendQuestion = async (event: FormEvent) => {
     event.preventDefault()
@@ -215,7 +251,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   }
 
   return (
-    <section className="relative flex h-full min-h-screen flex-col bg-white">
+    <section className="relative flex h-full min-h-screen min-w-0 flex-col overflow-x-hidden bg-white">
       <header className="relative flex h-14 shrink-0 items-center justify-center border-b border-[#eeeeee]">
         <button
           type="button"
@@ -244,8 +280,8 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
         </div>
       </header>
 
-      <div className="scrollbar-thin flex-1 overflow-y-auto">
-        <div className="mx-auto flex min-h-full max-w-5xl flex-col px-6">
+      <div className="scrollbar-thin min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+        <div className="mx-auto flex min-h-full w-full max-w-5xl min-w-0 flex-col px-4 sm:px-6">
           {error && (
             <div className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
@@ -253,19 +289,19 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
           )}
 
           {messages.length === 0 ? (
-            <div className="flex flex-1 flex-col items-center justify-center pb-36 pt-16">
-              <h2 className="text-center text-3xl font-bold tracking-normal text-[#111]">有什么我能帮你的吗？</h2>
-              <div className="mt-4 flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-4 py-2 text-sm text-blue-700">
-                <Database className="h-4 w-4" />
-                默认知识库：{selectedKnowledgeBaseText}
+            <div className="flex w-full min-w-0 flex-1 flex-col items-center justify-center pb-36 pt-16">
+              <h2 className="text-center text-2xl font-bold tracking-normal text-[#111] sm:text-3xl">有什么我能帮你的吗？</h2>
+              <div className="mt-4 flex max-w-full items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-4 py-2 text-sm text-blue-700">
+                <Database className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 truncate">默认知识库：{selectedKnowledgeBaseText}</span>
               </div>
-              <div className="mt-8 flex max-w-5xl flex-wrap justify-center gap-3">
+              <div className="mt-8 flex w-full max-w-5xl flex-wrap justify-center gap-3">
                 {suggestions.map((item) => (
                   <button
                     key={item}
                     type="button"
                     onClick={() => setQuestion(item)}
-                    className="rounded-xl bg-[#f5f5f5] px-4 py-3 text-sm text-[#222] transition hover:bg-[#eeeeee]"
+                    className="max-w-full rounded-xl bg-[#f5f5f5] px-4 py-3 text-sm text-[#222] transition hover:bg-[#eeeeee] sm:max-w-[calc(50%-0.75rem)] lg:max-w-full"
                   >
                     {item}
                   </button>
@@ -273,14 +309,14 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
               </div>
             </div>
           ) : (
-            <div className="flex-1 space-y-6 py-8 pb-48">
+            <div className="min-w-0 flex-1 space-y-6 py-8 pb-48">
               {messages.map((message, index) => (
                 <div key={`${message.role}-${index}`} className={message.role === "user" ? "flex justify-end" : "flex justify-start"}>
                   <div
                     className={
                       message.role === "user"
-                        ? "max-w-[78%] rounded-2xl bg-[#f4f4f4] p-4 text-[#111]"
-                        : "max-w-[82%] rounded-2xl border border-[#eeeeee] bg-white p-4 shadow-sm"
+                        ? "max-w-full rounded-2xl bg-[#f4f4f4] p-4 text-[#111] sm:max-w-[78%]"
+                        : "max-w-full rounded-2xl border border-[#eeeeee] bg-white p-4 shadow-sm sm:max-w-[82%]"
                     }
                   >
                     <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
@@ -313,8 +349,22 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
         </div>
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-white via-white to-white/0 px-6 pb-4 pt-14">
-        <form onSubmit={sendQuestion} className="pointer-events-auto mx-auto max-w-[820px]">
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 min-w-0 overflow-x-hidden bg-gradient-to-t from-white via-white to-white/0 px-4 pb-4 pt-14 sm:px-6">
+        <form ref={formRef} onSubmit={sendQuestion} className="pointer-events-auto relative mx-auto w-full max-w-[820px] min-w-0">
+          {kbPickerOpen && (
+            <KnowledgeBaseSelector
+              knowledgeBases={knowledgeBases}
+              selectedKbIds={selectedKbIds}
+              position={kbPickerPosition}
+              onToggle={(kbId) => {
+                setSelectedKbIds((current) =>
+                  current.includes(kbId)
+                    ? current.filter((item) => item !== kbId)
+                    : [...current, kbId]
+                )
+              }}
+            />
+          )}
           <div className="rounded-[26px] border border-blue-200/80 bg-white/95 p-3 shadow-[0_18px_50px_rgba(37,99,235,0.12)] backdrop-blur transition focus-within:border-blue-400 focus-within:shadow-[0_22px_60px_rgba(37,99,235,0.18)]">
             <div className="flex min-h-[78px] items-start gap-3">
               <Textarea
@@ -335,26 +385,17 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
             <div className="mt-1 flex items-center gap-2">
               <ToolIconButton icon={<Paperclip className="h-5 w-5" />} label="添加附件" disabled />
               <ToolIconButton icon={<Globe2 className="h-5 w-5" />} label="联网检索" disabled />
-              <div className="relative">
+              <div>
                 <ToolIconButton
                   icon={<Database className="h-5 w-5" />}
                   label="选择知识库"
                   active={kbPickerOpen || selectedKbIds.length > 0}
-                  onClick={() => setKbPickerOpen((value) => !value)}
+                  dataAttribute="kb-picker-trigger"
+                  onClick={() => {
+                    updateKbPickerPosition()
+                    setKbPickerOpen((value) => !value)
+                  }}
                 />
-                {kbPickerOpen && (
-                  <KnowledgeBaseSelector
-                    knowledgeBases={knowledgeBases}
-                    selectedKbIds={selectedKbIds}
-                    onToggle={(kbId) => {
-                      setSelectedKbIds((current) =>
-                        current.includes(kbId)
-                          ? current.filter((item) => item !== kbId)
-                          : [...current, kbId]
-                      )
-                    }}
-                  />
-                )}
               </div>
             </div>
           </div>
@@ -470,22 +511,41 @@ function EvaluationPanel({ evaluation }: { evaluation: Evaluation }) {
 function KnowledgeBaseSelector({
   knowledgeBases,
   selectedKbIds,
+  position,
   onToggle
 }: {
   knowledgeBases: KnowledgeBase[]
   selectedKbIds: string[]
+  position: { left: number; bottom: number; width: number }
   onToggle: (kbId: string) => void
 }) {
+  if (typeof document === "undefined") return null
+
+  const baseStyle = {
+    left: position.left,
+    bottom: position.bottom,
+    width: position.width
+  }
+
   if (knowledgeBases.length === 0) {
-    return (
-      <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[280px] rounded-2xl border border-[#e5e7eb] bg-white p-3 text-sm text-[#9aa3b2] shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
+    return createPortal(
+      <div
+        data-kb-picker
+        className="fixed z-[9999] -translate-x-1/2 rounded-2xl border border-[#e5e7eb] bg-white p-3 text-sm text-[#9aa3b2] shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
+        style={baseStyle}
+      >
         暂无知识库
-      </div>
+      </div>,
+      document.body
     )
   }
 
-  return (
-    <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 grid max-h-64 w-[320px] gap-2 overflow-y-auto rounded-2xl border border-[#e5e7eb] bg-white p-3 shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
+  return createPortal(
+    <div
+      data-kb-picker
+      className="fixed z-[9999] grid max-h-[280px] -translate-x-1/2 gap-2 overflow-y-auto rounded-2xl border border-[#e5e7eb] bg-white p-3 shadow-[0_18px_40px_rgba(15,23,42,0.12)]"
+      style={baseStyle}
+    >
       {knowledgeBases.map((knowledgeBase) => (
         <label
           key={knowledgeBase.id}
@@ -500,7 +560,8 @@ function KnowledgeBaseSelector({
           <span className="min-w-0 flex-1 truncate">{knowledgeBase.name}</span>
         </label>
       ))}
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -509,18 +570,23 @@ function ToolIconButton({
   label,
   active,
   disabled,
+  dataAttribute,
   onClick
 }: {
   icon: React.ReactNode
   label: string
   active?: boolean
   disabled?: boolean
+  dataAttribute?: string
   onClick?: () => void
 }) {
+  const dataProps = dataAttribute ? { [`data-${dataAttribute}`]: true } : {}
+
   return (
     <div className="group relative">
       <button
         type="button"
+        {...dataProps}
         disabled={disabled}
         onClick={onClick}
         aria-label={label}

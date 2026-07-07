@@ -27,15 +27,15 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   return (
-    <div className="min-h-screen bg-white">
-      <div className="flex min-h-screen overflow-hidden">
+    <div className="min-h-screen min-w-0 overflow-x-hidden bg-white">
+      <div className="flex min-h-screen min-w-0 overflow-hidden">
         <Sidebar
           active={active}
           collapsed={sidebarCollapsed}
           onChange={setActive}
         />
-        <main className="min-w-0 flex-1 overflow-y-auto bg-white">
-          <div className={active === "chat" ? "h-screen" : "mx-auto max-w-[1440px] p-4 lg:p-6"}>
+        <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-white">
+          <div className={active === "chat" ? "h-screen min-w-0 overflow-x-hidden" : "mx-auto max-w-[1440px] p-4 lg:p-6"}>
             {active === "chat" ? (
               <ChatPage
                 sidebarCollapsed={sidebarCollapsed}

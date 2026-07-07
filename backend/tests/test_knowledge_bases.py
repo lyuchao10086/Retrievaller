@@ -1,7 +1,13 @@
 from fastapi.testclient import TestClient
 
-from app.api.routes.knowledge_base import get_knowledge_base_repository
+from app.api.routes.knowledge_base import (
+    get_document_repository,
+    get_document_storage,
+    get_knowledge_base_repository,
+    get_vector_service,
+)
 from app.main import app
+from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
 from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from app.services.knowledge_base import (
@@ -43,13 +49,45 @@ class InMemoryKnowledgeBaseRepository:
             setattr(knowledge_base, field_name, value)
         return knowledge_base
 
-    async def soft_delete_active_by_id_and_user(self, kb_id, user_id, deleted_at):
+    async def delete_active_by_id_and_user(self, kb_id, user_id):
         knowledge_base = await self.get_active_by_id_and_user(kb_id, user_id)
         if knowledge_base is None:
             return None
-        knowledge_base.status = "deleted"
-        knowledge_base.updated_at = deleted_at
+        self.items = [item for item in self.items if item is not knowledge_base]
         return knowledge_base
+
+
+class FakeVectorService:
+    def __init__(self):
+        self.deleted_knowledge_bases = []
+
+    def delete_chunk_embeddings_by_knowledge_base(self, user_id, knowledge_base_id):
+        self.deleted_knowledge_bases.append(
+            {
+                "user_id": user_id,
+                "knowledge_base_id": knowledge_base_id,
+            }
+        )
+
+
+class InMemoryDocumentRepository:
+    def __init__(self):
+        self.items = []
+
+    async def list_by_knowledge_base(self, user_id, knowledge_base_id):
+        return [
+            item
+            for item in self.items
+            if item.user_id == user_id and item.knowledge_base_id == knowledge_base_id
+        ]
+
+
+class InMemoryDocumentStorage:
+    def __init__(self):
+        self.objects = {}
+
+    async def delete_object(self, bucket_name, object_key):
+        self.objects.pop((bucket_name, object_key), None)
 
 
 def test_create_knowledge_base_uses_default_user_and_active_status():
@@ -195,15 +233,14 @@ def test_update_knowledge_base_only_updates_active_default_user_item():
     assert other_user is None
 
 
-def test_delete_knowledge_base_soft_deletes_active_default_user_item():
+def test_delete_knowledge_base_hard_deletes_active_default_user_item():
     repository = InMemoryKnowledgeBaseRepository()
     active = run_async(
         create_knowledge_base(
             repository,
-            KnowledgeBaseCreate(name="待删除", description="只做软删除"),
+            KnowledgeBaseCreate(name="待删除", description="硬删除"),
         )
     )
-    original_updated_at = active.updated_at
 
     deleted = run_async(delete_knowledge_base(repository, active.id))
     listed_items = run_async(list_knowledge_bases(repository))
@@ -211,8 +248,7 @@ def test_delete_knowledge_base_soft_deletes_active_default_user_item():
 
     assert deleted is not None
     assert deleted.id == active.id
-    assert deleted.status == "deleted"
-    assert deleted.updated_at > original_updated_at
+    assert active not in repository.items
     assert listed_items == []
     assert found_after_delete is None
 
@@ -378,8 +414,11 @@ def test_knowledge_base_api_returns_404_when_update_target_is_not_visible():
     assert response.json() == {"detail": "Knowledge base not found"}
 
 
-def test_knowledge_base_api_can_soft_delete_item_by_id():
+def test_knowledge_base_api_can_hard_delete_item_by_id():
     repository = InMemoryKnowledgeBaseRepository()
+    vector_service = FakeVectorService()
+    document_repository = InMemoryDocumentRepository()
+    storage = InMemoryDocumentStorage()
 
     async def override_get_knowledge_base_repository():
         return repository
@@ -387,6 +426,9 @@ def test_knowledge_base_api_can_soft_delete_item_by_id():
     app.dependency_overrides[
         get_knowledge_base_repository
     ] = override_get_knowledge_base_repository
+    app.dependency_overrides[get_vector_service] = lambda: vector_service
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_document_storage] = lambda: storage
     try:
         client = TestClient(app)
         create_response = client.post(
@@ -394,6 +436,10 @@ def test_knowledge_base_api_can_soft_delete_item_by_id():
             json={"name": "准备删除", "description": "删除后列表不可见"},
         )
         created = create_response.json()
+        document = make_document("doc_target", created["id"])
+        document_repository.items.append(document)
+        storage.objects[(document.storage_bucket, document.storage_object_key)] = {"data": b"raw"}
+        storage.objects[(document.parsed_bucket, document.parsed_object_key)] = {"data": b"{}"}
 
         delete_response = client.delete(f"/api/knowledge-bases/{created['id']}")
         list_response = client.get("/api/knowledge-bases")
@@ -405,9 +451,15 @@ def test_knowledge_base_api_can_soft_delete_item_by_id():
     deleted = delete_response.json()
     assert deleted["id"] == created["id"]
     assert deleted["user_id"] == DEFAULT_USER_ID
-    assert deleted["status"] == "deleted"
-    assert deleted["created_at"] == created["created_at"]
-    assert deleted["updated_at"] > created["updated_at"]
+    assert deleted["status"] == "active"
+    assert vector_service.deleted_knowledge_bases == [
+        {
+            "user_id": DEFAULT_USER_ID,
+            "knowledge_base_id": created["id"],
+        }
+    ]
+    assert (document.storage_bucket, document.storage_object_key) not in storage.objects
+    assert (document.parsed_bucket, document.parsed_object_key) not in storage.objects
     assert list_response.status_code == 200
     assert list_response.json() == []
     assert detail_response.status_code == 404
@@ -416,6 +468,9 @@ def test_knowledge_base_api_can_soft_delete_item_by_id():
 
 def test_knowledge_base_api_returns_404_when_delete_target_is_not_visible():
     repository = InMemoryKnowledgeBaseRepository()
+    document_repository = InMemoryDocumentRepository()
+    storage = InMemoryDocumentStorage()
+    vector_service = FakeVectorService()
 
     async def override_get_knowledge_base_repository():
         return repository
@@ -423,6 +478,9 @@ def test_knowledge_base_api_returns_404_when_delete_target_is_not_visible():
     app.dependency_overrides[
         get_knowledge_base_repository
     ] = override_get_knowledge_base_repository
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_document_storage] = lambda: storage
+    app.dependency_overrides[get_vector_service] = lambda: vector_service
     try:
         client = TestClient(app)
         response = client.delete("/api/knowledge-bases/kb_missing")
@@ -437,3 +495,32 @@ def run_async(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def make_document(document_id: str, knowledge_base_id: str) -> Document:
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return Document(
+        id=document_id,
+        user_id=DEFAULT_USER_ID,
+        knowledge_base_id=knowledge_base_id,
+        file_name="demo.md",
+        file_type="text/markdown",
+        file_size=3,
+        storage_bucket="rag-documents",
+        storage_object_key=(
+            f"users/{DEFAULT_USER_ID}/knowledge_bases/{knowledge_base_id}/raw/"
+            f"{document_id}/demo.md"
+        ),
+        status="embedded",
+        error_message=None,
+        parsed_bucket="rag-parsed-results",
+        parsed_object_key=(
+            f"users/{DEFAULT_USER_ID}/knowledge_bases/{knowledge_base_id}/parsed/"
+            f"{document_id}.json"
+        ),
+        task_id=None,
+        created_at=now,
+        updated_at=now,
+    )
