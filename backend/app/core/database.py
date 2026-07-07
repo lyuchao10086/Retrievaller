@@ -155,6 +155,7 @@ async def create_tables() -> None:
                 CREATE TABLE IF NOT EXISTS qa_records (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(128) NOT NULL,
+                    title VARCHAR(255) NOT NULL DEFAULT '新对话',
                     question TEXT NOT NULL,
                     answer MEDIUMTEXT NOT NULL,
                     knowledge_base_ids MEDIUMTEXT NOT NULL,
@@ -193,6 +194,12 @@ async def create_tables() -> None:
                         REFERENCES qa_records (id)
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 """
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="qa_records",
+                column_name="title",
+                column_definition="VARCHAR(255) NOT NULL DEFAULT '新对话' AFTER user_id",
             )
             await ensure_column_exists(
                 cursor,

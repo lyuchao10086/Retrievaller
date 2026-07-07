@@ -3,6 +3,8 @@ import type {
   MultiRagAnswerRequest,
   MultiRagAnswerResponse,
   QaRecord,
+  RagSuggestionsRequest,
+  RagSuggestionsResponse,
   RagAnswerRequest,
   RagAnswerResponse
 } from "@/types/rag"
@@ -26,4 +28,11 @@ export function answerQuestionAcrossKnowledgeBases(payload: MultiRagAnswerReques
 
 export function listQaRecords() {
   return request<QaRecord[]>("/api/rag/records")
+}
+
+export function createRagSuggestions(payload: RagSuggestionsRequest) {
+  return request<RagSuggestionsResponse>("/api/rag/suggestions", {
+    method: "POST",
+    body: payload
+  })
 }

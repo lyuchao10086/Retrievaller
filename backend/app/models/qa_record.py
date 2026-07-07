@@ -12,6 +12,7 @@ class QaRecord:
 
     id: str
     user_id: str
+    title: str
     question: str
     answer: str
     knowledge_base_ids: list[str]

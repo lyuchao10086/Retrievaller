@@ -102,3 +102,16 @@ class MultiKnowledgeBaseRagAnswerResponse(BaseModel):
     top_k: int
     answer: str
     sources: list[MultiKnowledgeBaseRagSource]
+
+
+class RagSuggestionsRequest(BaseModel):
+    """首页建议问题生成请求。"""
+
+    knowledge_base_names: list[str] = Field(default_factory=list)
+    count: int = Field(default=8, ge=1, le=12)
+
+
+class RagSuggestionsResponse(BaseModel):
+    """首页建议问题生成响应。"""
+
+    suggestions: list[str]

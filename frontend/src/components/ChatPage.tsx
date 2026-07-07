@@ -1,16 +1,41 @@
 import { FormEvent, useEffect, useMemo, useState } from "react"
-import { ArrowUp, Bot, Database, PanelLeftClose, PanelLeftOpen, Plus, Share2, Sparkles, UserRound } from "lucide-react"
+import {
+  ArrowUp,
+  Bot,
+  Database,
+  Globe2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Paperclip,
+  Share2,
+  Sparkles,
+  UserRound
+} from "lucide-react"
 import { ApiError } from "@/api/client"
 import { evaluateQaRecord } from "@/api/evaluationApi"
 import { listKnowledgeBases } from "@/api/knowledgeBaseApi"
-import { answerQuestionAcrossKnowledgeBases } from "@/api/ragApi"
+import { answerQuestionAcrossKnowledgeBases, createRagSuggestions } from "@/api/ragApi"
 import type { Evaluation } from "@/types/evaluation"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
 import type { MultiRagSource } from "@/types/rag"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
-import { Input } from "./ui/input"
 import { Textarea } from "./ui/textarea"
+import { cn } from "./ui/utils"
+
+const DEFAULT_SUGGESTIONS = [
+  "总结默认知识库中的核心结论",
+  "这个文档主要讲了什么？",
+  "列出回答中的引用来源",
+  "检索到的原文依据有哪些？",
+  "根据当前知识库资料能确定什么？",
+  "请用条理化方式回答这个问题",
+  "如果资料不足，请说明无法确定",
+  "当前知识库里有哪些关键流程？"
+]
+
+const DEFAULT_TOP_K = 5
+const TOP_K_STORAGE_KEY = "retrievaller.defaultTopK"
 
 type Message = {
   role: "user" | "assistant"
@@ -22,17 +47,6 @@ type Message = {
   evaluationError?: string
 }
 
-const suggestions = [
-  "总结当前知识库中的核心结论",
-  "请根据知识库回答制度流程问题",
-  "这个文档主要讲了什么？",
-  "列出回答中的引用来源",
-  "根据当前知识库资料能确定什么？",
-  "检索到的原文依据有哪些？",
-  "请用条理化方式回答这个问题",
-  "如果资料不足，请说明无法确定"
-]
-
 type ChatPageProps = {
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
@@ -43,7 +57,8 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   const [question, setQuestion] = useState("")
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([])
-  const [topK, setTopK] = useState(5)
+  const [suggestions, setSuggestions] = useState(DEFAULT_SUGGESTIONS)
+  const [kbPickerOpen, setKbPickerOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
 
@@ -55,7 +70,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
     () =>
       selectedKnowledgeBases.length > 0
         ? selectedKnowledgeBases.map((item) => item.name).join("、")
-        : "请至少选择一个知识库",
+        : "联网模式：暂无默认知识库",
     [selectedKnowledgeBases]
   )
 
@@ -78,6 +93,39 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
       ignore = true
     }
   }, [])
+
+  useEffect(() => {
+    let ignore = false
+
+    async function loadSuggestions() {
+      if (selectedKnowledgeBases.length === 0) {
+        setSuggestions([
+          "联网检索这个问题的最新资料",
+          "请说明资料不足时如何处理",
+          "先帮我梳理问题背景",
+          "给出可验证的信息来源"
+        ])
+        return
+      }
+
+      try {
+        const response = await createRagSuggestions({
+          knowledge_base_names: selectedKnowledgeBases.map((item) => item.name),
+          count: 8
+        })
+        if (!ignore && response.suggestions.length > 0) {
+          setSuggestions(response.suggestions)
+        }
+      } catch {
+        if (!ignore) setSuggestions(DEFAULT_SUGGESTIONS)
+      }
+    }
+
+    void loadSuggestions()
+    return () => {
+      ignore = true
+    }
+  }, [selectedKnowledgeBases])
 
   const sendQuestion = async (event: FormEvent) => {
     event.preventDefault()
@@ -113,7 +161,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
       const response = await answerQuestionAcrossKnowledgeBases({
         query: trimmed,
         knowledge_base_ids: selectedKbIds,
-        top_k: topK
+        top_k: readDefaultTopK()
       })
       setMessages((current) => [
         ...current,
@@ -124,6 +172,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
           qaRecordId: response.qa_record_id
         }
       ])
+      window.dispatchEvent(new Event("retrievaller:qa-records-updated"))
     } catch (unknownError) {
       setError(readErrorMessage(unknownError))
       setMessages((current) => current.filter((_, index) => index !== current.length - 1))
@@ -208,7 +257,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
               <h2 className="text-center text-3xl font-bold tracking-normal text-[#111]">有什么我能帮你的吗？</h2>
               <div className="mt-4 flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-4 py-2 text-sm text-blue-700">
                 <Database className="h-4 w-4" />
-                检索范围：{selectedKnowledgeBaseText}
+                默认知识库：{selectedKnowledgeBaseText}
               </div>
               <div className="mt-8 flex max-w-5xl flex-wrap justify-center gap-3">
                 {suggestions.map((item) => (
@@ -283,37 +332,30 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
                 <ArrowUp className="h-4 w-4" />
               </Button>
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                className="flex h-9 items-center gap-2 rounded-full px-3 text-sm font-medium text-[#1f1f1f] transition hover:bg-[#f4f6fb]"
-                aria-label="多知识库问答"
-              >
-                <Plus className="h-5 w-5" />
-                <span className="hidden sm:inline">多知识库</span>
-              </button>
-              <KnowledgeBaseSelector
-                knowledgeBases={knowledgeBases}
-                selectedKbIds={selectedKbIds}
-                onToggle={(kbId) => {
-                  setSelectedKbIds((current) =>
-                    current.includes(kbId)
-                      ? current.filter((item) => item !== kbId)
-                      : [...current, kbId]
-                  )
-                }}
-              />
-              <label className="flex h-9 items-center gap-2 rounded-full border border-[#e5e7eb] px-3 text-sm text-[#1f1f1f]">
-                top_k
-                <Input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={topK}
-                  onChange={(event) => setTopK(clampTopK(Number(event.target.value)))}
-                  className="h-7 w-16 border-0 px-1 text-center shadow-none focus-visible:ring-0"
+            <div className="mt-1 flex items-center gap-2">
+              <ToolIconButton icon={<Paperclip className="h-5 w-5" />} label="添加附件" disabled />
+              <ToolIconButton icon={<Globe2 className="h-5 w-5" />} label="联网检索" disabled />
+              <div className="relative">
+                <ToolIconButton
+                  icon={<Database className="h-5 w-5" />}
+                  label="选择知识库"
+                  active={kbPickerOpen || selectedKbIds.length > 0}
+                  onClick={() => setKbPickerOpen((value) => !value)}
                 />
-              </label>
+                {kbPickerOpen && (
+                  <KnowledgeBaseSelector
+                    knowledgeBases={knowledgeBases}
+                    selectedKbIds={selectedKbIds}
+                    onToggle={(kbId) => {
+                      setSelectedKbIds((current) =>
+                        current.includes(kbId)
+                          ? current.filter((item) => item !== kbId)
+                          : [...current, kbId]
+                      )
+                    }}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </form>
@@ -436,18 +478,18 @@ function KnowledgeBaseSelector({
 }) {
   if (knowledgeBases.length === 0) {
     return (
-      <div className="flex h-9 items-center rounded-full border border-[#e5e7eb] px-3 text-sm text-[#9aa3b2]">
+      <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[280px] rounded-2xl border border-[#e5e7eb] bg-white p-3 text-sm text-[#9aa3b2] shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
         暂无知识库
       </div>
     )
   }
 
   return (
-    <div className="flex max-h-20 max-w-full flex-wrap gap-2 overflow-y-auto rounded-2xl border border-[#e5e7eb] bg-white px-3 py-2">
+    <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 grid max-h-64 w-[320px] gap-2 overflow-y-auto rounded-2xl border border-[#e5e7eb] bg-white p-3 shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
       {knowledgeBases.map((knowledgeBase) => (
         <label
           key={knowledgeBase.id}
-          className="flex h-7 items-center gap-2 rounded-full bg-[#f6f7fb] px-3 text-xs text-[#1f1f1f]"
+          className="flex min-h-9 items-center gap-2 rounded-xl bg-[#f6f7fb] px-3 text-sm text-[#1f1f1f] transition hover:bg-[#eef2ff]"
         >
           <input
             type="checkbox"
@@ -455,9 +497,43 @@ function KnowledgeBaseSelector({
             onChange={() => onToggle(knowledgeBase.id)}
             className="h-3.5 w-3.5 accent-blue-600"
           />
-          <span className="max-w-[160px] truncate">{knowledgeBase.name}</span>
+          <span className="min-w-0 flex-1 truncate">{knowledgeBase.name}</span>
         </label>
       ))}
+    </div>
+  )
+}
+
+function ToolIconButton({
+  icon,
+  label,
+  active,
+  disabled,
+  onClick
+}: {
+  icon: React.ReactNode
+  label: string
+  active?: boolean
+  disabled?: boolean
+  onClick?: () => void
+}) {
+  return (
+    <div className="group relative">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onClick}
+        aria-label={label}
+        className={cn(
+          "flex h-9 w-9 items-center justify-center rounded-full text-[#1f1f1f] transition hover:bg-[#f4f6fb] disabled:cursor-not-allowed disabled:text-[#b8b8b8]",
+          active && "bg-blue-50 text-blue-700"
+        )}
+      >
+        {icon}
+      </button>
+      <div className="pointer-events-none absolute bottom-[calc(100%+8px)] left-1/2 z-50 -translate-x-1/2 whitespace-nowrap rounded-md bg-black px-2 py-1 text-xs text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+        {label}
+      </div>
     </div>
   )
 }
@@ -469,8 +545,12 @@ function formatSource(source: MultiRagSource["source"]) {
   return [source.knowledge_base_name, fileSource].filter(Boolean).join(" / ")
 }
 
+function readDefaultTopK() {
+  return clampTopK(Number(window.localStorage.getItem(TOP_K_STORAGE_KEY)))
+}
+
 function clampTopK(value: number) {
-  if (Number.isNaN(value)) return 5
+  if (Number.isNaN(value)) return DEFAULT_TOP_K
   return Math.min(20, Math.max(1, value))
 }
 

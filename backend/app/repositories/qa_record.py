@@ -37,6 +37,7 @@ class MySQLQaRecordRepository:
                 INSERT INTO qa_records (
                     id,
                     user_id,
+                    title,
                     question,
                     answer,
                     knowledge_base_ids,
@@ -44,11 +45,12 @@ class MySQLQaRecordRepository:
                     created_at,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     record.id,
                     record.user_id,
+                    record.title,
                     record.question,
                     record.answer,
                     json.dumps(record.knowledge_base_ids, ensure_ascii=False),
@@ -68,6 +70,7 @@ class MySQLQaRecordRepository:
                 SELECT
                     id,
                     user_id,
+                    title,
                     question,
                     answer,
                     knowledge_base_ids,
@@ -96,6 +99,7 @@ class MySQLQaRecordRepository:
                 SELECT
                     id,
                     user_id,
+                    title,
                     question,
                     answer,
                     knowledge_base_ids,
@@ -119,6 +123,7 @@ class MySQLQaRecordRepository:
         return QaRecord(
             id=str(row["id"]),
             user_id=str(row["user_id"]),
+            title=str(row.get("title") or _fallback_title(str(row["question"]))),
             question=str(row["question"]),
             answer=str(row["answer"]),
             knowledge_base_ids=_loads_json_list(row["knowledge_base_ids"]),
@@ -140,3 +145,8 @@ def _loads_json_dict_list(value: object) -> list[dict[str, Any]]:
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, dict)]
+
+
+def _fallback_title(question: str) -> str:
+    title = " ".join(question.strip().split())
+    return title[:24] if title else "新对话"

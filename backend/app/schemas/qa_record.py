@@ -8,6 +8,7 @@ class QaRecordResponse(BaseModel):
     """问答记录列表接口返回结构。"""
 
     id: str
+    title: str
     question: str
     answer: str
     knowledge_base_ids: list[str]

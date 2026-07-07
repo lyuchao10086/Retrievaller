@@ -20,8 +20,11 @@ import {
   UploadCloud,
   UserRound
 } from "lucide-react"
+import { ApiError } from "@/api/client"
+import { listQaRecords } from "@/api/ragApi"
 import retrievallerAvatar from "@/assets/retrievaller-avatar.png"
 import type { MenuKey } from "@/data/mockData"
+import type { QaRecord } from "@/types/rag"
 import { cn } from "./ui/utils"
 
 type SidebarProps = {
@@ -36,25 +39,12 @@ type HistoryItem = {
   pinned: boolean
 }
 
-const initialHistories: HistoryItem[] = [
-  { id: "main", title: "主对话", pinned: true },
-  { id: "ppt", title: "论文汇报PPT生成", pinned: false },
-  { id: "turkish-name", title: "土耳其名字生成", pinned: false },
-  { id: "prelu-flow", title: "PReLUGradReduce算子流程图", pinned: false },
-  { id: "noble-logo", title: "QQ飞车NOBLE赛车车标", pinned: false },
-  { id: "hallucination-image", title: "大模型幻觉图片生成", pinned: false },
-  { id: "self-rag", title: "Self-RAG：结合检索与自我反思", pinned: false },
-  { id: "paper-ppt", title: "生成论文汇报PPT", pinned: false },
-  { id: "model-io", title: "模型输入到输出流程", pinned: false },
-  { id: "pagerank", title: "PageRank算法实现（杂志评分）", pinned: false },
-  { id: "video", title: "生成30秒视频", pinned: false }
-]
-
 export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [moreExpanded, setMoreExpanded] = useState(false)
   const [search, setSearch] = useState("")
-  const [histories, setHistories] = useState<HistoryItem[]>(initialHistories)
+  const [histories, setHistories] = useState<HistoryItem[]>([])
+  const [historyError, setHistoryError] = useState("")
   const [historyMenu, setHistoryMenu] = useState<{ id: string; x: number; y: number } | null>(null)
 
   const moreItems: Array<{ key: MenuKey; label: string; icon: typeof UploadCloud }> = [
@@ -78,6 +68,29 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
     () => moreItems.filter((item) => item.label.toLowerCase().includes(query)),
     [moreItems, query]
   )
+
+  useEffect(() => {
+    let ignore = false
+
+    async function loadHistories() {
+      try {
+        const records = await listQaRecords()
+        if (!ignore) {
+          setHistories((current) => mergeHistoryPins(records, current))
+          setHistoryError("")
+        }
+      } catch (unknownError) {
+        if (!ignore) setHistoryError(readErrorMessage(unknownError))
+      }
+    }
+
+    void loadHistories()
+    window.addEventListener("retrievaller:qa-records-updated", loadHistories)
+    return () => {
+      ignore = true
+      window.removeEventListener("retrievaller:qa-records-updated", loadHistories)
+    }
+  }, [])
 
   useEffect(() => {
     if (!historyMenu) return
@@ -145,7 +158,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           >
             <span className="flex items-center gap-2">
               <Edit3 className="h-4 w-4" />
-              知识库问答
+              新对话
             </span>
             <span className="text-xs text-[#b8b8b8]">⇧ ⌘ K</span>
           </button>
@@ -314,8 +327,13 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
               </div>
             </div>
           ))}
-          {query && filteredHistories.length === 0 && (
-            <div className="rounded-lg px-2 py-2 text-xs text-[#999]">没有匹配的历史对话</div>
+          {historyError && (
+            <div className="rounded-lg px-2 py-2 text-xs text-red-500">历史加载失败：{historyError}</div>
+          )}
+          {!historyError && filteredHistories.length === 0 && (
+            <div className="rounded-lg px-2 py-2 text-xs text-[#999]">
+              {query ? "没有匹配的历史对话" : "暂无历史对话"}
+            </div>
           )}
         </div>
       </div>
@@ -400,4 +418,23 @@ function HistoryMenuItem({
       <span>{label}</span>
     </button>
   )
+}
+
+function mergeHistoryPins(records: QaRecord[], current: HistoryItem[]) {
+  const pinnedById = new Map(current.map((history) => [history.id, history.pinned]))
+  return records.map((record) => ({
+    id: record.id,
+    title: formatHistoryTitle(record),
+    pinned: pinnedById.get(record.id) ?? false
+  }))
+}
+
+function formatHistoryTitle(record: QaRecord) {
+  const title = record.title && record.title !== "新对话" ? record.title : record.question
+  const compact = title.trim().split(/\s+/).join(" ")
+  return compact ? compact.slice(0, 24) : "新对话"
+}
+
+function readErrorMessage(unknownError: unknown) {
+  return unknownError instanceof ApiError ? unknownError.detail : String(unknownError)
 }

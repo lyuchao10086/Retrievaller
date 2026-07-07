@@ -56,10 +56,20 @@ export type MultiRagAnswerResponse = {
 
 export type QaRecord = {
   id: string
+  title: string
   question: string
   answer: string
   knowledge_base_ids: string[]
   sources_json: MultiRagSource[]
   created_at: string
   updated_at?: string | null
+}
+
+export type RagSuggestionsRequest = {
+  knowledge_base_names: string[]
+  count?: number
+}
+
+export type RagSuggestionsResponse = {
+  suggestions: string[]
 }

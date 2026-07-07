@@ -9,9 +9,13 @@ import { Select } from "./ui/select"
 import { Slider } from "./ui/slider"
 import { Switch } from "./ui/switch"
 
+const DEFAULT_TOP_K = 5
+const TOP_K_STORAGE_KEY = "retrievaller.defaultTopK"
+
 export default function SettingsPage() {
   const [showKey, setShowKey] = useState(false)
   const [temperature, setTemperature] = useState(0.2)
+  const [topK, setTopK] = useState(() => readStoredTopK())
   const [gpu, setGpu] = useState(true)
   const [preprocess, setPreprocess] = useState(true)
   const [rerank, setRerank] = useState(true)
@@ -107,7 +111,19 @@ export default function SettingsPage() {
             <CardDescription>Retriever 默认行为</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Field label="默认 Top-K"><Input type="number" defaultValue={5} /></Field>
+            <Field label="默认 Top-K">
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                value={topK}
+                onChange={(event) => {
+                  const next = clampTopK(Number(event.target.value))
+                  setTopK(next)
+                  window.localStorage.setItem(TOP_K_STORAGE_KEY, String(next))
+                }}
+              />
+            </Field>
             <Field label="默认检索方式">
               <Select defaultValue="similarity">
                 <option value="similarity">相似度检索</option>
@@ -128,6 +144,15 @@ export default function SettingsPage() {
       </div>
     </section>
   )
+}
+
+function readStoredTopK() {
+  return clampTopK(Number(window.localStorage.getItem(TOP_K_STORAGE_KEY)))
+}
+
+function clampTopK(value: number) {
+  if (Number.isNaN(value)) return DEFAULT_TOP_K
+  return Math.min(20, Math.max(1, value))
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
