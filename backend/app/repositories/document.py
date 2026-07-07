@@ -70,6 +70,22 @@ class DocumentRepository(Protocol):
     ) -> Document | None:
         raise NotImplementedError
 
+    async def list_by_ids_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_ids: list[str],
+    ) -> list[Document]:
+        raise NotImplementedError
+
+    async def list_by_ids_and_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+        document_ids: list[str],
+    ) -> list[Document]:
+        raise NotImplementedError
+
 
 class MySQLDocumentRepository:
     """文档持久化的 MySQL 实现。"""
@@ -357,6 +373,89 @@ class MySQLDocumentRepository:
             knowledge_base_id,
             document_id,
         )
+
+    async def list_by_ids_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_ids: list[str],
+    ) -> list[Document]:
+        """按 document_id 列表批量查询文档元数据，用于 RAG 来源展示。"""
+        if not document_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(document_ids))
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    knowledge_base_id,
+                    file_name,
+                    file_type,
+                    file_size,
+                    storage_bucket,
+                    storage_object_key,
+                    status,
+                    error_message,
+                    parsed_bucket,
+                    parsed_object_key,
+                    task_id,
+                    created_at,
+                    updated_at
+                FROM documents
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND status != 'deleted'
+                  AND id IN ({placeholders})
+                """,
+                (user_id, knowledge_base_id, *document_ids),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
+
+    async def list_by_ids_and_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+        document_ids: list[str],
+    ) -> list[Document]:
+        """批量查询多个知识库范围内的文档元数据，用于多知识库 RAG 来源展示。"""
+        if not knowledge_base_ids or not document_ids:
+            return []
+
+        kb_placeholders = ", ".join(["%s"] * len(knowledge_base_ids))
+        doc_placeholders = ", ".join(["%s"] * len(document_ids))
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    knowledge_base_id,
+                    file_name,
+                    file_type,
+                    file_size,
+                    storage_bucket,
+                    storage_object_key,
+                    status,
+                    error_message,
+                    parsed_bucket,
+                    parsed_object_key,
+                    task_id,
+                    created_at,
+                    updated_at
+                FROM documents
+                WHERE user_id = %s
+                  AND knowledge_base_id IN ({kb_placeholders})
+                  AND status != 'deleted'
+                  AND id IN ({doc_placeholders})
+                """,
+                (user_id, *knowledge_base_ids, *document_ids),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
 
     async def _get_by_id_and_knowledge_base_including_deleted(
         self,

@@ -2,10 +2,14 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.document import router as document_router
+from app.api.routes.evaluation import router as evaluation_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge_base import router as knowledge_base_router
+from app.api.routes.rag import multi_router as multi_rag_router
+from app.api.routes.rag import router as rag_router
 from app.core.config import get_settings
 from app.core.database import close_database, init_database
 
@@ -24,9 +28,19 @@ def create_app() -> FastAPI:
     """创建并配置 FastAPI 应用实例。"""
     settings = get_settings()
     application = FastAPI(title=settings.app_name, lifespan=lifespan)
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allow_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     application.include_router(health_router)
     application.include_router(knowledge_base_router)
     application.include_router(document_router)
+    application.include_router(rag_router)
+    application.include_router(multi_rag_router)
+    application.include_router(evaluation_router)
     return application
 
 

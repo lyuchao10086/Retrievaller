@@ -1,15 +1,215 @@
-import { ArrowRight, Database, GitBranch, Layers3 } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { ArrowRight, Database, GitBranch, Layers3, Plus, RefreshCw, Save, Trash2 } from "lucide-react"
 import PageHeader from "./PageHeader"
 import { Badge } from "./ui/badge"
+import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
 import { Select } from "./ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table"
-import { chunks } from "@/data/mockData"
+import { ApiError } from "@/api/client"
+import {
+  createKnowledgeBase,
+  deleteKnowledgeBase,
+  listKnowledgeBases,
+  updateKnowledgeBase
+} from "@/api/knowledgeBaseApi"
+import {
+  createChunks,
+  embedDocument,
+  getEmbeddingStatus,
+  listChunks,
+  listDocuments
+} from "@/api/documentApi"
+import type { ChunkRecord } from "@/types/chunk"
+import type { DocumentRecord, EmbeddingStatus } from "@/types/document"
+import type { KnowledgeBase } from "@/types/knowledgeBase"
 
 export default function KnowledgeBasePage() {
   const flow = ["原始文本", "文本清洗", "文档切分", "Embedding", "向量存储", "Retriever"]
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
+  const [selectedKbId, setSelectedKbId] = useState("")
+  const [documents, setDocuments] = useState<DocumentRecord[]>([])
+  const [selectedDocumentId, setSelectedDocumentId] = useState("")
+  const [chunks, setChunks] = useState<ChunkRecord[]>([])
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null)
+  const [name, setName] = useState("")
+  const [description, setDescription] = useState("")
+  const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState("")
+  const [error, setError] = useState("")
+
+  const selectedKb = useMemo(
+    () => knowledgeBases.find((knowledgeBase) => knowledgeBase.id === selectedKbId) ?? null,
+    [knowledgeBases, selectedKbId]
+  )
+  const selectedDocument = useMemo(
+    () => documents.find((document) => document.id === selectedDocumentId) ?? null,
+    [documents, selectedDocumentId]
+  )
+
+  const showError = (unknownError: unknown) => {
+    setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+  }
+
+  const refreshKnowledgeBases = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await listKnowledgeBases()
+      setKnowledgeBases(data)
+      setSelectedKbId((current) => current || data[0]?.id || "")
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  const refreshDocuments = useCallback(async (kbId = selectedKbId) => {
+    if (!kbId) {
+      setDocuments([])
+      setSelectedDocumentId("")
+      return
+    }
+    try {
+      const data = await listDocuments(kbId)
+      setDocuments(data)
+      setSelectedDocumentId((current) => current || data[0]?.id || "")
+    } catch (unknownError) {
+      showError(unknownError)
+    }
+  }, [selectedKbId])
+
+  useEffect(() => {
+    void refreshKnowledgeBases()
+  }, [refreshKnowledgeBases])
+
+  useEffect(() => {
+    if (!selectedKb) {
+      setName("")
+      setDescription("")
+      return
+    }
+    setName(selectedKb.name)
+    setDescription(selectedKb.description ?? "")
+    setChunks([])
+    setEmbeddingStatus(null)
+    void refreshDocuments(selectedKb.id)
+  }, [selectedKb, refreshDocuments])
+
+  const submitCreate = async () => {
+    if (!name.trim()) return
+    setLoading(true)
+    setError("")
+    try {
+      const created = await createKnowledgeBase({
+        name: name.trim(),
+        description: description.trim() || null
+      })
+      setMessage("知识库已创建")
+      await refreshKnowledgeBases()
+      setSelectedKbId(created.id)
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitUpdate = async () => {
+    if (!selectedKb || !name.trim()) return
+    setLoading(true)
+    setError("")
+    try {
+      await updateKnowledgeBase(selectedKb.id, {
+        name: name.trim(),
+        description: description.trim() || null
+      })
+      setMessage("知识库已更新")
+      await refreshKnowledgeBases()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitDelete = async () => {
+    if (!selectedKb || !window.confirm(`确认删除知识库「${selectedKb.name}」？`)) return
+    setLoading(true)
+    setError("")
+    try {
+      await deleteKnowledgeBase(selectedKb.id)
+      setMessage("知识库已删除")
+      setSelectedKbId("")
+      setSelectedDocumentId("")
+      setChunks([])
+      await refreshKnowledgeBases()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitCreateChunks = async () => {
+    if (!selectedKbId || !selectedDocumentId) return
+    setLoading(true)
+    setError("")
+    try {
+      const data = await createChunks(selectedKbId, selectedDocumentId)
+      setChunks(data)
+      setMessage("chunks 已生成")
+      await refreshDocuments(selectedKbId)
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const refreshChunks = async () => {
+    if (!selectedKbId || !selectedDocumentId) return
+    setLoading(true)
+    setError("")
+    try {
+      setChunks(await listChunks(selectedKbId, selectedDocumentId))
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const submitEmbed = async () => {
+    if (!selectedKbId || !selectedDocumentId) return
+    setLoading(true)
+    setError("")
+    try {
+      setEmbeddingStatus(await embedDocument(selectedKbId, selectedDocumentId))
+      setMessage("embedding 已完成")
+      await refreshDocuments(selectedKbId)
+      await refreshChunks()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const refreshEmbeddingStatus = async () => {
+    if (!selectedKbId || !selectedDocumentId) return
+    setLoading(true)
+    setError("")
+    try {
+      setEmbeddingStatus(await getEmbeddingStatus(selectedKbId, selectedDocumentId))
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   return (
     <section>
@@ -18,48 +218,75 @@ export default function KnowledgeBasePage() {
         description="配置 Chunk 策略、Embedding 模型、向量数据库与检索方式，模拟 LangChain Retriever 的完整构建过程。"
       />
 
+      {(message || error) && (
+        <div className="mb-4 grid gap-2">
+          {message && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
+          {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+        </div>
+      )}
+
       <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
         <Card>
           <CardHeader>
             <CardTitle>知识库配置</CardTitle>
-            <CardDescription>文本切分与检索参数</CardDescription>
+            <CardDescription>主题知识库与当前文档处理对象</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
             <div className="space-y-2">
-              <Label>Chunk Size</Label>
-              <Input type="number" defaultValue={500} />
+              <Label>当前知识库</Label>
+              <Select value={selectedKbId} onChange={(event) => setSelectedKbId(event.target.value)}>
+                <option value="">新建知识库</option>
+                {knowledgeBases.map((knowledgeBase) => (
+                  <option key={knowledgeBase.id} value={knowledgeBase.id}>
+                    {knowledgeBase.name}
+                  </option>
+                ))}
+              </Select>
             </div>
             <div className="space-y-2">
-              <Label>Chunk Overlap</Label>
-              <Input type="number" defaultValue={50} />
+              <Label>知识库状态</Label>
+              <Input readOnly value={selectedKb?.status ?? "new"} />
+            </div>
+            <div className="space-y-2">
+              <Label>知识库名称</Label>
+              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：课题组论文库" />
+            </div>
+            <div className="space-y-2">
+              <Label>知识库描述</Label>
+              <Input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="可选" />
+            </div>
+            <div className="space-y-2">
+              <Label>当前文档</Label>
+              <Select value={selectedDocumentId} onChange={(event) => setSelectedDocumentId(event.target.value)}>
+                <option value="">请选择文档</option>
+                {documents.map((document) => (
+                  <option key={document.id} value={document.id}>
+                    {document.file_name} ({document.status})
+                  </option>
+                ))}
+              </Select>
             </div>
             <div className="space-y-2">
               <Label>Embedding 模型</Label>
-              <Select defaultValue="bge">
-                <option value="bge">bge-small-zh</option>
-                <option value="ada">text-embedding-ada</option>
-                <option value="m3e">m3e-base</option>
-              </Select>
+              <Input readOnly value="quentinz/bge-large-zh-v1.5:latest" />
             </div>
-            <div className="space-y-2">
-              <Label>向量数据库</Label>
-              <Select defaultValue="faiss">
-                <option value="faiss">FAISS</option>
-                <option value="chroma">Chroma</option>
-                <option value="milvus">Milvus</option>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>检索方式</Label>
-              <Select defaultValue="similarity">
-                <option value="similarity">相似度检索</option>
-                <option value="mmr">MMR</option>
-                <option value="hybrid">Hybrid Search</option>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Top-K</Label>
-              <Input type="number" defaultValue={5} />
+            <div className="flex flex-wrap gap-2 md:col-span-2">
+              <Button onClick={() => void submitCreate()} disabled={loading || !name.trim()}>
+                <Plus className="h-4 w-4" />
+                创建知识库
+              </Button>
+              <Button variant="outline" onClick={() => void submitUpdate()} disabled={loading || !selectedKb}>
+                <Save className="h-4 w-4" />
+                保存修改
+              </Button>
+              <Button variant="outline" onClick={() => void refreshKnowledgeBases()} disabled={loading}>
+                <RefreshCw className="h-4 w-4" />
+                刷新
+              </Button>
+              <Button variant="destructive" onClick={() => void submitDelete()} disabled={loading || !selectedKb}>
+                <Trash2 className="h-4 w-4" />
+                软删除
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -67,7 +294,7 @@ export default function KnowledgeBasePage() {
         <Card>
           <CardHeader>
             <CardTitle>构建流程图</CardTitle>
-            <CardDescription>从 OCR 文本到 Retriever 的转换链路</CardDescription>
+            <CardDescription>从解析结果到 Milvus 向量库的转换链路</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 md:grid-cols-3">
@@ -87,33 +314,70 @@ export default function KnowledgeBasePage() {
       </div>
 
       <Card className="mt-5">
-        <CardHeader>
-          <CardTitle>切片预览表格</CardTitle>
-          <CardDescription>Chunk、来源页码、Embedding 与入库状态</CardDescription>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>切片预览表格</CardTitle>
+            <CardDescription>Chunk、章节来源、Embedding 与入库状态</CardDescription>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={() => void submitCreateChunks()} disabled={loading || selectedDocument?.status !== "parsed"}>
+              文档切分
+            </Button>
+            <Button variant="outline" onClick={() => void refreshChunks()} disabled={loading || !selectedDocumentId}>
+              查看 Chunk
+            </Button>
+            <Button onClick={() => void submitEmbed()} disabled={loading || selectedDocument?.status !== "chunked"}>
+              Embedding
+            </Button>
+            <Button variant="outline" onClick={() => void refreshEmbeddingStatus()} disabled={loading || !selectedDocumentId}>
+              向量状态
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
+          {embeddingStatus && (
+            <div className="mb-4 grid gap-3 rounded-lg border bg-blue-50/50 p-4 text-sm md:grid-cols-4">
+              <span>document_status: <b>{embeddingStatus.status}</b></span>
+              <span>total_chunks: <b>{embeddingStatus.total_chunks}</b></span>
+              <span>embedded_chunks: <b>{embeddingStatus.embedded_chunks}</b></span>
+              <span>pending_chunks: <b>{embeddingStatus.pending_chunks}</b></span>
+            </div>
+          )}
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Chunk ID</TableHead>
                 <TableHead>来源文档</TableHead>
-                <TableHead>页码</TableHead>
+                <TableHead>章节</TableHead>
                 <TableHead>文本片段</TableHead>
                 <TableHead>Embedding 状态</TableHead>
                 <TableHead>入库状态</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {chunks.map((chunk) => (
-                <TableRow key={chunk.id}>
-                  <TableCell className="font-mono text-xs">{chunk.id}</TableCell>
-                  <TableCell>{chunk.doc}</TableCell>
-                  <TableCell>{chunk.page}</TableCell>
-                  <TableCell className="max-w-md text-muted-foreground">{chunk.text}</TableCell>
-                  <TableCell><Badge variant={chunk.embedding === "已生成" ? "success" : "warning"}>{chunk.embedding}</Badge></TableCell>
-                  <TableCell><Badge variant={chunk.stored === "已入库" ? "success" : "secondary"}>{chunk.stored}</Badge></TableCell>
+              {chunks.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                    {selectedDocumentId ? "暂无 Chunk，请先对 parsed 文档执行文档切分" : "请选择一个文档"}
+                  </TableCell>
                 </TableRow>
-              ))}
+              ) : (
+                chunks.map((chunk) => (
+                  <TableRow key={chunk.id}>
+                    <TableCell className="font-mono text-xs">{chunk.id}</TableCell>
+                    <TableCell>{selectedDocument?.file_name ?? chunk.document_id}</TableCell>
+                    <TableCell>
+                      <div className="text-sm">{chunk.chapter || "-"}</div>
+                      <div className="text-xs text-muted-foreground">{chunk.section || chunk.subsection || "-"}</div>
+                    </TableCell>
+                    <TableCell className="max-w-md text-muted-foreground">
+                      <div className="max-h-20 overflow-auto">{chunk.content}</div>
+                    </TableCell>
+                    <TableCell><Badge variant={chunk.status === "embedded" ? "success" : "warning"}>{chunk.status}</Badge></TableCell>
+                    <TableCell><Badge variant={chunk.vector_id ? "success" : "secondary"}>{chunk.vector_id ? "已入库" : "待入库"}</Badge></TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </CardContent>

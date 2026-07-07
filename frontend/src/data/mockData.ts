@@ -4,6 +4,7 @@ import {
   BrainCircuit,
   CheckCircle2,
   Database,
+  ClipboardCheck,
   FileSearch,
   FileText,
   Layers3,
@@ -19,6 +20,7 @@ export type MenuKey =
   | "ocr"
   | "knowledge"
   | "chat"
+  | "qaRecords"
   | "citations"
   | "evaluation"
   | "settings"
@@ -29,6 +31,7 @@ export const menuItems = [
   { key: "ocr" as const, label: "OCR 解析", icon: ScanText },
   { key: "knowledge" as const, label: "知识库构建", icon: Database },
   { key: "chat" as const, label: "RAG 问答", icon: MessageSquareText },
+  { key: "qaRecords" as const, label: "问答记录", icon: ClipboardCheck },
   { key: "citations" as const, label: "引用来源", icon: FileSearch },
   { key: "evaluation" as const, label: "系统评估", icon: BrainCircuit },
   { key: "settings" as const, label: "设置", icon: Sparkles }

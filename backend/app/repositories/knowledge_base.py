@@ -22,6 +22,13 @@ class KnowledgeBaseRepository(Protocol):
     ) -> KnowledgeBase | None:
         raise NotImplementedError
 
+    async def list_active_by_ids_and_user(
+        self,
+        kb_ids: list[str],
+        user_id: str,
+    ) -> list[KnowledgeBase]:
+        raise NotImplementedError
+
     async def update_active_by_id_and_user(
         self,
         kb_id: str,
@@ -127,6 +134,37 @@ class MySQLKnowledgeBaseRepository:
         if row is None:
             return None
         return self._from_row(row)
+
+    async def list_active_by_ids_and_user(
+        self,
+        kb_ids: list[str],
+        user_id: str,
+    ) -> list[KnowledgeBase]:
+        """批量查询当前用户 active 知识库，用于多知识库 RAG 校验。"""
+        if not kb_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(kb_ids))
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    name,
+                    description,
+                    status,
+                    created_at,
+                    updated_at
+                FROM knowledge_bases
+                WHERE user_id = %s
+                  AND status = 'active'
+                  AND id IN ({placeholders})
+                """,
+                (user_id, *kb_ids),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
 
     async def update_active_by_id_and_user(
         self,

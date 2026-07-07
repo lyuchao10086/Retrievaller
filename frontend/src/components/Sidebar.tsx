@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import {
   BookOpen,
   ChevronRight,
+  ClipboardCheck,
   Edit3,
   FileSearch,
   FileText,
@@ -59,6 +60,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   const moreItems: Array<{ key: MenuKey; label: string; icon: typeof UploadCloud }> = [
     { key: "upload", label: "文档上传", icon: UploadCloud },
     { key: "ocr", label: "OCR 解析", icon: FileText },
+    { key: "qaRecords", label: "问答记录", icon: ClipboardCheck },
     { key: "citations", label: "引用来源", icon: FileSearch },
     { key: "evaluation", label: "系统评估", icon: Grid2X2 },
     { key: "settings", label: "设置", icon: Settings }
@@ -143,7 +145,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
           >
             <span className="flex items-center gap-2">
               <Edit3 className="h-4 w-4" />
-              新对话
+              知识库问答
             </span>
             <span className="text-xs text-[#b8b8b8]">⇧ ⌘ K</span>
           </button>

@@ -150,6 +150,50 @@ async def create_tables() -> None:
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS qa_records (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    question TEXT NOT NULL,
+                    answer MEDIUMTEXT NOT NULL,
+                    knowledge_base_ids MEDIUMTEXT NOT NULL,
+                    sources_json MEDIUMTEXT NOT NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    INDEX idx_qa_records_user_created_at
+                        (user_id, created_at)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    qa_record_id VARCHAR(64) NOT NULL,
+                    faithfulness_score TINYINT NOT NULL,
+                    relevance_score TINYINT NOT NULL,
+                    citation_score TINYINT NOT NULL,
+                    completeness_score TINYINT NOT NULL,
+                    hallucination BOOLEAN NOT NULL,
+                    overall_score TINYINT NOT NULL,
+                    reason TEXT NOT NULL,
+                    raw_response MEDIUMTEXT NOT NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    UNIQUE KEY uq_evaluations_user_qa_record
+                        (user_id, qa_record_id),
+                    INDEX idx_evaluations_user_created_at
+                        (user_id, created_at),
+                    CONSTRAINT fk_evaluations_qa_record
+                        FOREIGN KEY (qa_record_id)
+                        REFERENCES qa_records (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
             await ensure_column_exists(
                 cursor,
                 table_name="documents",

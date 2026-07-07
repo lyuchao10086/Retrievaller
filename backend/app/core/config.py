@@ -36,8 +36,19 @@ class Settings(BaseSettings):
     embedding_model_name: str = "quentinz/bge-large-zh-v1.5:latest"
     embedding_dimension: int = 1024
     ollama_base_url: str = "http://host.docker.internal:11434"
+    local_llm_model: str = "qwen3:latest"
+
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-pro"
 
     health_check_timeout_seconds: float = 2.0
+
+    # 前端开发服务和后端端口不同，需要显式允许跨域来源。
+    cors_allow_origins: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
 
     model_config = SettingsConfigDict(
         env_file=ROOT_DIR / ".env",

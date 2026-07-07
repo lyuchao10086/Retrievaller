@@ -54,6 +54,36 @@ class ChunkRepository(Protocol):
     ) -> dict[str, int]:
         raise NotImplementedError
 
+    async def list_by_ids(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        chunk_ids: list[str],
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
+    async def list_by_ids_and_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+        chunk_ids: list[str],
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
+    async def exists_embedded_by_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+    ) -> bool:
+        raise NotImplementedError
+
+    async def exists_embedded_by_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+    ) -> bool:
+        raise NotImplementedError
+
 
 class MySQLChunkRepository:
     """chunk 持久化的 MySQL 实现。"""
@@ -269,6 +299,133 @@ class MySQLChunkRepository:
             "embedded_chunks": embedded_chunks,
             "pending_chunks": total_chunks - embedded_chunks,
         }
+
+    async def list_by_ids(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        chunk_ids: list[str],
+    ) -> list[Chunk]:
+        """按 chunk_id 列表批量回查 chunk，并再次带上沙箱条件。"""
+        if not chunk_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(chunk_ids))
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    knowledge_base_id,
+                    document_id,
+                    chunk_index,
+                    title,
+                    content,
+                    chapter,
+                    section,
+                    subsection,
+                    status,
+                    vector_id,
+                    created_at,
+                    updated_at
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND id IN ({placeholders})
+                """,
+                (user_id, knowledge_base_id, *chunk_ids),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
+
+    async def list_by_ids_and_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+        chunk_ids: list[str],
+    ) -> list[Chunk]:
+        """批量回查多个知识库范围内的 chunks，并再次带上沙箱条件。"""
+        if not knowledge_base_ids or not chunk_ids:
+            return []
+
+        kb_placeholders = ", ".join(["%s"] * len(knowledge_base_ids))
+        chunk_placeholders = ", ".join(["%s"] * len(chunk_ids))
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    knowledge_base_id,
+                    document_id,
+                    chunk_index,
+                    title,
+                    content,
+                    chapter,
+                    section,
+                    subsection,
+                    status,
+                    vector_id,
+                    created_at,
+                    updated_at
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id IN ({kb_placeholders})
+                  AND id IN ({chunk_placeholders})
+                """,
+                (user_id, *knowledge_base_ids, *chunk_ids),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
+
+    async def exists_embedded_by_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+    ) -> bool:
+        """判断知识库下是否已有写入向量库的 chunk。"""
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT 1
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND status = 'embedded'
+                  AND vector_id IS NOT NULL
+                LIMIT 1
+                """,
+                (user_id, knowledge_base_id),
+            )
+            row = await cursor.fetchone()
+        return row is not None
+
+    async def exists_embedded_by_knowledge_base_ids(
+        self,
+        user_id: str,
+        knowledge_base_ids: list[str],
+    ) -> bool:
+        """判断多个知识库范围内是否已有可检索向量。"""
+        if not knowledge_base_ids:
+            return False
+
+        placeholders = ", ".join(["%s"] * len(knowledge_base_ids))
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                f"""
+                SELECT 1
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id IN ({placeholders})
+                  AND status = 'embedded'
+                  AND vector_id IS NOT NULL
+                LIMIT 1
+                """,
+                (user_id, *knowledge_base_ids),
+            )
+            row = await cursor.fetchone()
+        return row is not None
 
     async def _get_by_id(
         self,
