@@ -191,7 +191,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
             onClick={() => onChange("knowledge")}
             className={cn(
               "flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium transition",
-              active === "knowledge" ? "bg-white shadow-sm" : "hover:bg-white"
+              active === "knowledge" || active === "kbCreate" ? "bg-white shadow-sm" : "hover:bg-white"
             )}
           >
             <BookOpen className="h-4 w-4" />

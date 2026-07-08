@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { ArrowRight, Database, GitBranch, Layers3, Plus, RefreshCw, Save, Trash2 } from "lucide-react"
 import PageHeader from "./PageHeader"
+import ConfirmDialog from "./ui/ConfirmDialog"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
@@ -39,6 +40,8 @@ export default function KnowledgeBasePage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [deleteLoading, setDeleteLoading] = useState(false)
 
   const selectedKb = useMemo(
     () => knowledgeBases.find((knowledgeBase) => knowledgeBase.id === selectedKbId) ?? null,
@@ -136,8 +139,13 @@ export default function KnowledgeBasePage() {
   }
 
   const submitDelete = async () => {
-    if (!selectedKb || !window.confirm(`确认删除知识库「${selectedKb.name}」？`)) return
-    setLoading(true)
+    if (!selectedKb) return
+    setDeleteConfirmOpen(true)
+  }
+
+  const confirmDelete = async () => {
+    if (!selectedKb) return
+    setDeleteLoading(true)
     setError("")
     try {
       await deleteKnowledgeBase(selectedKb.id)
@@ -149,7 +157,8 @@ export default function KnowledgeBasePage() {
     } catch (unknownError) {
       showError(unknownError)
     } finally {
-      setLoading(false)
+      setDeleteLoading(false)
+      setDeleteConfirmOpen(false)
     }
   }
 
@@ -382,6 +391,17 @@ export default function KnowledgeBasePage() {
           </Table>
         </CardContent>
       </Card>
+      <ConfirmDialog
+        open={deleteConfirmOpen}
+        title="要删除知识库吗？"
+        description={selectedKb ? `确认删除知识库「${selectedKb.name}」？此操作不可撤销，知识库下的所有文档和向量数据将被永久删除。` : ""}
+        confirmLabel="确认删除"
+        cancelLabel="取消"
+        danger
+        loading={deleteLoading}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteConfirmOpen(false)}
+      />
     </section>
   )
 }

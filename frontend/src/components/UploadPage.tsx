@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Activity, FileJson, FilePlus2, FolderInput, RefreshCw, Trash2, UploadCloud } from "lucide-react"
 import PageHeader from "./PageHeader"
+import ConfirmDialog from "./ui/ConfirmDialog"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
@@ -42,6 +43,8 @@ export default function UploadPage() {
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
   const [parsedJson, setParsedJson] = useState("")
+  const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const showError = (unknownError: unknown) => {
@@ -127,17 +130,22 @@ export default function UploadPage() {
   }
 
   const removeDocument = async (document: DocumentRecord) => {
-    if (!window.confirm(`确认删除文档「${document.file_name}」？`)) return
-    setWorkingId(document.id)
+    setDeleteTarget(document)
+  }
+
+  const confirmDeleteDocument = async () => {
+    if (!deleteTarget) return
+    setDeleteLoading(true)
     setError("")
     try {
-      await deleteDocument(selectedKbId, document.id)
+      await deleteDocument(selectedKbId, deleteTarget.id)
       setMessage("文档已删除")
       await refreshDocuments(selectedKbId)
     } catch (unknownError) {
       showError(unknownError)
     } finally {
-      setWorkingId(null)
+      setDeleteLoading(false)
+      setDeleteTarget(null)
     }
   }
 
@@ -324,6 +332,17 @@ export default function UploadPage() {
           )}
         </CardContent>
       </Card>
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="要删除该文档吗？"
+        description={deleteTarget ? `确认删除文档「${deleteTarget.file_name}」？此操作不可撤销。` : ""}
+        confirmLabel="确认删除"
+        cancelLabel="取消"
+        danger
+        loading={deleteLoading}
+        onConfirm={() => void confirmDeleteDocument()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </section>
   )
 }

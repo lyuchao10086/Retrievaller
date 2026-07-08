@@ -6,6 +6,7 @@ import { deleteQaRecord, listQaRecords } from "@/api/ragApi"
 import type { Evaluation } from "@/types/evaluation"
 import type { MultiRagSource, QaRecord } from "@/types/rag"
 import PageHeader from "./PageHeader"
+import ConfirmDialog from "./ui/ConfirmDialog"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
@@ -23,6 +24,8 @@ export default function QaRecordsPage() {
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
   const [dialog, setDialog] = useState<DialogState>(null)
+  const [deleteTarget, setDeleteTarget] = useState<QaRecord | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
 
   const totalSources = useMemo(
     () => records.reduce((sum, record) => sum + (record.sources_json?.length ?? 0), 0),
@@ -79,19 +82,24 @@ export default function QaRecordsPage() {
   }
 
   async function removeRecord(record: QaRecord) {
-    if (!window.confirm(`确认删除问答记录「${record.title || record.question}」？`)) return
-    setWorkingId(record.id)
+    setDeleteTarget(record)
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return
+    setDeleteLoading(true)
     setError("")
     setMessage("")
     try {
-      await deleteQaRecord(record.id)
-      setRecords((current) => current.filter((item) => item.id !== record.id))
-      setDialog((current) => (current?.kind === "sources" && current.record.id === record.id ? null : current))
+      await deleteQaRecord(deleteTarget.id)
+      setRecords((current) => current.filter((item) => item.id !== deleteTarget.id))
+      setDialog((current) => (current?.kind === "sources" && current.record.id === deleteTarget.id ? null : current))
       setMessage("问答记录已删除")
     } catch (unknownError) {
       setError(readErrorMessage(unknownError))
     } finally {
-      setWorkingId(null)
+      setDeleteLoading(false)
+      setDeleteTarget(null)
     }
   }
 
@@ -194,6 +202,18 @@ export default function QaRecordsPage() {
       </Card>
 
       {dialog && <RecordDialog dialog={dialog} onClose={() => setDialog(null)} />}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="要删除该问答记录吗？"
+        description={deleteTarget ? `确认删除问答记录「${deleteTarget.title || deleteTarget.question}」？此操作不可撤销。` : ""}
+        confirmLabel="确认删除"
+        cancelLabel="取消"
+        danger
+        loading={deleteLoading}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </section>
   )
 }

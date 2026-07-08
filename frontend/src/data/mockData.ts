@@ -19,6 +19,7 @@ export type MenuKey =
   | "upload"
   | "ocr"
   | "knowledge"
+  | "kbCreate"
   | "kbBuild"
   | "chat"
   | "qaRecords"

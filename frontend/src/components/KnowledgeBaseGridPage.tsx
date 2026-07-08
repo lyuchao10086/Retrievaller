@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Plus, Search, X, FileText, Database, MoreHorizontal, Pencil } from "lucide-react"
 import { ApiError } from "@/api/client"
 import {
-  createKnowledgeBase,
   deleteKnowledgeBase,
   listKnowledgeBases,
   updateKnowledgeBase
@@ -11,6 +10,7 @@ import {
 import { listDocuments } from "@/api/documentApi"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
 import { cn } from "./ui/utils"
+import ConfirmDialog from "./ui/ConfirmDialog"
 
 type KbWithDocCount = KnowledgeBase & { docCount: number }
 
@@ -32,21 +32,23 @@ function formatRelativeTime(dateStr: string) {
   return `${Math.floor(diffDays / 365)}年前`
 }
 
-export default function KnowledgeBaseGridPage() {
+type Props = {
+  onNavigate?: (key: import("@/data/mockData").MenuKey) => void
+}
+
+export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
   const [knowledgeBases, setKnowledgeBases] = useState<KbWithDocCount[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [query, setQuery] = useState("")
-  const [createOpen, setCreateOpen] = useState(false)
-  const [createName, setCreateName] = useState("")
-  const [createDesc, setCreateDesc] = useState("")
-  const [createLoading, setCreateLoading] = useState(false)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [editOpen, setEditOpen] = useState(false)
   const [editKb, setEditKb] = useState<KnowledgeBase | null>(null)
   const [editName, setEditName] = useState("")
   const [editDesc, setEditDesc] = useState("")
   const [editLoading, setEditLoading] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<KnowledgeBase | null>(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const loadKnowledgeBases = async () => {
@@ -89,33 +91,22 @@ export default function KnowledgeBaseGridPage() {
     )
   }, [knowledgeBases, query])
 
-  const handleCreate = async () => {
-    if (!createName.trim()) return
-    setCreateLoading(true)
+  const handleDelete = async (kb: KnowledgeBase) => {
+    setDeleteTarget(kb)
+  }
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    setDeleteLoading(true)
     setError("")
     try {
-      await createKnowledgeBase({
-        name: createName.trim(),
-        description: createDesc.trim() || null
-      })
-      setCreateOpen(false)
-      setCreateName("")
-      setCreateDesc("")
+      await deleteKnowledgeBase(deleteTarget.id)
+      setDeleteTarget(null)
       await loadKnowledgeBases()
     } catch (unknownError) {
       setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
     } finally {
-      setCreateLoading(false)
-    }
-  }
-
-  const handleDelete = async (kb: KnowledgeBase) => {
-    if (!window.confirm(`确认删除知识库「${kb.name}」？`)) return
-    try {
-      await deleteKnowledgeBase(kb.id)
-      await loadKnowledgeBases()
-    } catch (unknownError) {
-      setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+      setDeleteLoading(false)
     }
   }
 
@@ -182,7 +173,7 @@ export default function KnowledgeBaseGridPage() {
         </div>
         <button
           type="button"
-          onClick={() => setCreateOpen(true)}
+          onClick={() => onNavigate?.("kbCreate")}
           className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700"
         >
           <Plus className="h-4 w-4" />
@@ -283,75 +274,6 @@ export default function KnowledgeBaseGridPage() {
         )}
       </div>
 
-      {/* Create Modal */}
-      {createOpen &&
-        createPortal(
-          <div className="fixed inset-0 z-[10000] flex items-center justify-center">
-            <div className="fixed inset-0 bg-black/30 backdrop-blur-sm" onClick={() => setCreateOpen(false)} />
-            <div className="relative z-10 w-full max-w-[420px] rounded-2xl border border-[#e7e7e7] bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
-              <div className="mb-5 flex items-center justify-between">
-                <h3 className="text-base font-semibold text-[#1f1f1f]">创建知识库</h3>
-                <button
-                  type="button"
-                  onClick={() => setCreateOpen(false)}
-                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[#999] transition hover:bg-[#f4f4f4]"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="space-y-4">
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-[#333]">名称</label>
-                  <input
-                    autoFocus
-                    value={createName}
-                    onChange={(e) => setCreateName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey) {
-                        e.preventDefault()
-                        void handleCreate()
-                      }
-                    }}
-                    placeholder="例如：课题组论文库"
-                    className="w-full rounded-lg border border-[#ddd] px-3 py-2 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-sm font-medium text-[#333]">描述</label>
-                  <input
-                    value={createDesc}
-                    onChange={(e) => setCreateDesc(e.target.value)}
-                    placeholder="可选"
-                    className="w-full rounded-lg border border-[#ddd] px-3 py-2 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                  />
-                </div>
-              </div>
-              <div className="mt-6 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setCreateOpen(false)}
-                  className="rounded-lg border border-[#ddd] px-4 py-2 text-sm text-[#555] transition hover:bg-[#f5f5f5]"
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleCreate()}
-                  disabled={createLoading || !createName.trim()}
-                  className={cn(
-                    "rounded-lg px-4 py-2 text-sm font-medium text-white transition",
-                    createLoading || !createName.trim()
-                      ? "cursor-not-allowed bg-blue-300"
-                      : "bg-blue-600 hover:bg-blue-700"
-                  )}
-                >
-                  {createLoading ? "创建中..." : "创建"}
-                </button>
-              </div>
-            </div>
-          </div>,
-          document.body
-        )}
 
       {/* Edit Modal */}
       {editOpen && editKb &&
@@ -388,11 +310,12 @@ export default function KnowledgeBaseGridPage() {
                 </div>
                 <div>
                   <label className="mb-1.5 block text-sm font-medium text-[#333]">描述</label>
-                  <input
+                  <textarea
                     value={editDesc}
                     onChange={(e) => setEditDesc(e.target.value)}
                     placeholder="可选"
-                    className="w-full rounded-lg border border-[#ddd] px-3 py-2 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                    rows={5}
+                    className="w-full resize-none rounded-lg border border-[#ddd] px-3 py-2 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
                   />
                 </div>
               </div>
@@ -422,6 +345,19 @@ export default function KnowledgeBaseGridPage() {
           </div>,
           document.body
         )}
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="要删除知识库吗？"
+        description={`删除知识库是不可逆的。用户将无法再访问您的知识库，所有的提示配置和日志将被永久删除。`}
+        confirmLabel="确认"
+        cancelLabel="取消"
+        danger
+        loading={deleteLoading}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </section>
   )
 }
