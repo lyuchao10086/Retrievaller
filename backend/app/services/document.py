@@ -1,7 +1,3 @@
-import json
-import inspect
-from collections.abc import Awaitable, Callable
-from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -15,17 +11,7 @@ from app.services.knowledge_base import DEFAULT_USER_ID
 
 DEFAULT_DOCUMENT_BUCKET = "rag-documents"
 UPLOADED_STATUS = "uploaded"
-PARSING_STATUS = "parsing"
-PARSED_STATUS = "parsed"
-FAILED_STATUS = "failed"
 DEFAULT_FILE_TYPE = "application/octet-stream"
-STATUS_MUST_BE_UPLOADED_MESSAGE = "Document status must be uploaded before parsing"
-DOCUMENT_NOT_PARSED_MESSAGE = "Document has not been parsed yet"
-PARSED_RESULT_NOT_FOUND_MESSAGE = "Parsed result not found"
-
-
-class DocumentStatusError(ValueError):
-    """文档状态不允许执行当前操作。"""
 
 
 class KnowledgeBaseNotFoundError(LookupError):
@@ -34,14 +20,6 @@ class KnowledgeBaseNotFoundError(LookupError):
 
 class DocumentNotFoundError(LookupError):
     """当前知识库沙箱下找不到可见文档。"""
-
-
-class ParsedDocumentNotReadyError(ValueError):
-    """文档还没有进入 parsed 状态，不能预览解析结果。"""
-
-
-class ParsedResultNotFoundError(ValueError):
-    """文档已 parsed，但缺少解析结果对象位置。"""
 
 
 async def upload_document_to_knowledge_base(
@@ -130,44 +108,6 @@ async def get_document_by_id(
     )
 
 
-async def get_parsed_document_content(
-    knowledge_base_repository: KnowledgeBaseRepository,
-    document_repository: DocumentRepository,
-    storage: DocumentStorage,
-    kb_id: str,
-    document_id: str,
-    user_id: str = DEFAULT_USER_ID,
-) -> dict[str, Any]:
-    """读取指定知识库下文档的 parsed JSON。
-
-    这里同时校验知识库、用户、文档和解析状态，避免跨知识库读取解析结果。
-    """
-    knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
-        kb_id,
-        user_id,
-    )
-    if knowledge_base is None:
-        raise KnowledgeBaseNotFoundError("Knowledge base not found")
-
-    document = await document_repository.get_by_id_and_knowledge_base(
-        user_id,
-        kb_id,
-        document_id,
-    )
-    if document is None:
-        raise DocumentNotFoundError("Document not found")
-    if document.status != PARSED_STATUS:
-        raise ParsedDocumentNotReadyError(DOCUMENT_NOT_PARSED_MESSAGE)
-    if not document.parsed_bucket or not document.parsed_object_key:
-        raise ParsedResultNotFoundError(PARSED_RESULT_NOT_FOUND_MESSAGE)
-
-    parsed_bytes = await storage.get_object(
-        document.parsed_bucket,
-        document.parsed_object_key,
-    )
-    return json.loads(parsed_bytes.decode("utf-8"))
-
-
 async def delete_document(
     document_repository: DocumentRepository,
     kb_id: str,
@@ -204,76 +144,3 @@ async def delete_document_storage_objects(
             document.parsed_bucket,
             document.parsed_object_key,
         )
-
-
-async def parse_document(
-    document_repository: DocumentRepository,
-    kb_id: str,
-    document_id: str,
-    user_id: str = DEFAULT_USER_ID,
-    parse_runner: Callable[[], None | Awaitable[None]] | None = None,
-) -> Document | None:
-    """模拟文档解析状态流转。
-
-    当前阶段只跑状态机：uploaded -> parsing -> parsed。
-    不读取 MinIO 文件内容，不做 OCR、chunk、向量化或大模型调用。
-    """
-    document = await document_repository.get_by_id_and_knowledge_base(
-        user_id,
-        kb_id,
-        document_id,
-    )
-    if document is None:
-        return None
-    if document.status != UPLOADED_STATUS:
-        raise DocumentStatusError(STATUS_MUST_BE_UPLOADED_MESSAGE)
-
-    await _set_document_status(
-        document_repository,
-        user_id,
-        kb_id,
-        document_id,
-        PARSING_STATUS,
-        None,
-    )
-    try:
-        if parse_runner is not None:
-            result = parse_runner()
-            if inspect.isawaitable(result):
-                await result
-        return await _set_document_status(
-            document_repository,
-            user_id,
-            kb_id,
-            document_id,
-            PARSED_STATUS,
-            None,
-        )
-    except Exception as exc:
-        return await _set_document_status(
-            document_repository,
-            user_id,
-            kb_id,
-            document_id,
-            FAILED_STATUS,
-            str(exc),
-        )
-
-
-async def _set_document_status(
-    document_repository: DocumentRepository,
-    user_id: str,
-    kb_id: str,
-    document_id: str,
-    status: str,
-    error_message: str | None,
-) -> Document | None:
-    """写入文档状态并刷新更新时间。"""
-    return await document_repository.update_status_by_id_and_knowledge_base(
-        user_id,
-        kb_id,
-        document_id,
-        status,
-        error_message,
-        datetime.now(timezone.utc).replace(tzinfo=None),
-    )

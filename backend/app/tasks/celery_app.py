@@ -11,7 +11,6 @@ celery_app = Celery(
     "retrievaller",
     broker=build_redis_url(),
     backend=build_redis_url(settings.redis_result_db),
-    include=["app.tasks.document_tasks"],
 )
 
 celery_app.conf.update(

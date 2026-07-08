@@ -90,15 +90,6 @@ async def get_evaluation_by_qa_record_id(
     return evaluation
 
 
-async def list_evaluations(
-    evaluation_repository: EvaluationRepository,
-    user_id: str = DEFAULT_USER_ID,
-    limit: int = 50,
-) -> list[Evaluation]:
-    """查询当前用户最近的评估记录。"""
-    return await evaluation_repository.list_recent_by_user(user_id, limit)
-
-
 def _build_user_prompt(qa_record: QaRecord) -> str:
     sources_text = _format_sources(qa_record.sources_json)
     return f"""用户问题：

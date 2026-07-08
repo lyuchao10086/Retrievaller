@@ -1,6 +1,5 @@
 import { useState } from "react"
 import Sidebar from "./components/Sidebar"
-import Dashboard from "./components/Dashboard"
 import UploadPage from "./components/UploadPage"
 import OCRPage from "./components/OCRPage"
 import KnowledgeBasePage from "./components/KnowledgeBasePage"
@@ -18,7 +17,6 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   const pageMap: Record<Exclude<MenuKey, "chat">, JSX.Element> = {
-    dashboard: <Dashboard />,
     upload: <UploadPage />,
     ocr: <OCRPage />,
     knowledge: <KnowledgeBaseGridPage onNavigate={setActive} />,

@@ -11,6 +11,7 @@ import { listDocuments } from "@/api/documentApi"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
 import { cn } from "./ui/utils"
 import ConfirmDialog from "./ui/ConfirmDialog"
+import KnowledgeBaseDetailPage from "./KnowledgeBaseDetailPage"
 
 type KbWithDocCount = KnowledgeBase & { docCount: number }
 
@@ -49,6 +50,7 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
   const [editLoading, setEditLoading] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<KnowledgeBase | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
+  const [selectedKb, setSelectedKb] = useState<KnowledgeBase | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const loadKnowledgeBases = async () => {
@@ -148,6 +150,18 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
+  if (selectedKb) {
+    return (
+      <KnowledgeBaseDetailPage
+        knowledgeBase={selectedKb}
+        onBack={() => {
+          setSelectedKb(null)
+          void loadKnowledgeBases()
+        }}
+      />
+    )
+  }
+
   return (
     <section className="min-h-full bg-white">
       {/* Header */}
@@ -174,7 +188,7 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
         <button
           type="button"
           onClick={() => onNavigate?.("kbCreate")}
-          className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700"
+          className="mt-[43px] flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700"
         >
           <Plus className="h-4 w-4" />
           创建
@@ -201,7 +215,16 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
             {filtered.map((kb) => (
               <div
                 key={kb.id}
-                className="group relative flex flex-col rounded-xl border border-[#e8e8e8] bg-white p-5 shadow-sm transition hover:border-[#d0d0d0] hover:shadow-md"
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedKb(kb)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    setSelectedKb(kb)
+                  }
+                }}
+                className="group relative flex cursor-pointer flex-col rounded-xl border border-[#e8e8e8] bg-white p-5 shadow-sm transition hover:border-[#d0d0d0] hover:shadow-md"
                 style={{ minHeight: 150 }}
               >
                 {/* Three-dot menu */}
@@ -218,7 +241,10 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
                     <MoreHorizontal className="h-3.5 w-3.5" />
                   </button>
                   {openMenuId === kb.id && (
-                    <div className="absolute right-0 top-8 z-50 w-44 rounded-lg border border-[#e7e7e7] bg-white py-1 shadow-lg">
+                    <div
+                      className="absolute right-0 top-8 z-50 w-44 rounded-lg border border-[#e7e7e7] bg-white py-1 shadow-lg"
+                      onClick={(event) => event.stopPropagation()}
+                    >
                       <button
                         type="button"
                         onClick={() => handleEdit(kb)}

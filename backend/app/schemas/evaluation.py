@@ -22,9 +22,3 @@ class EvaluationResponse(BaseModel):
 
 class EvaluationCreateResult(EvaluationResponse):
     """创建评估结果响应，当前字段与 EvaluationResponse 一致。"""
-
-
-class EvaluationListResponse(BaseModel):
-    """评估记录列表响应。"""
-
-    items: list[EvaluationResponse]

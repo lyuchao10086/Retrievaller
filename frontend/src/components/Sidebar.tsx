@@ -2,11 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import {
   BookOpen,
   ChevronRight,
-  ClipboardCheck,
-  Database,
   Edit3,
-  FileSearch,
-  FileText,
   Grid2X2,
   History,
   MoreHorizontal,
@@ -17,7 +13,6 @@ import {
   Share2,
   Trash2,
   TriangleAlert,
-  UploadCloud,
   UserRound
 } from "lucide-react"
 import { ApiError } from "@/api/client"
@@ -51,13 +46,7 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
   const [historyError, setHistoryError] = useState("")
   const [historyMenu, setHistoryMenu] = useState<{ id: string; x: number; y: number } | null>(null)
 
-  const moreItems: Array<{ key: MenuKey; label: string; icon: typeof UploadCloud }> = [
-    { key: "kbBuild", label: "知识库构建", icon: Database },
-    { key: "upload", label: "文档上传", icon: UploadCloud },
-    { key: "ocr", label: "OCR 解析", icon: FileText },
-    { key: "qaRecords", label: "问答记录", icon: ClipboardCheck },
-    { key: "citations", label: "引用来源", icon: FileSearch },
-    { key: "evaluation", label: "系统评估", icon: Grid2X2 },
+  const moreItems: Array<{ key: MenuKey; label: string; icon: typeof Settings }> = [
     { key: "settings", label: "设置", icon: Settings }
   ]
 
@@ -160,11 +149,8 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
 
         <button
           type="button"
-          className={cn(
-            "mb-2 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition hover:bg-white",
-            active === "dashboard" && "bg-white shadow-sm"
-          )}
-          onClick={() => onChange("dashboard")}
+          className="mb-2 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left transition hover:bg-white"
+          onClick={() => onChange("chat")}
         >
           <img src="/favicon.svg?v=search" alt="" className="h-7 w-7 rounded-lg object-cover" />
           <span className="flex-1 text-sm font-semibold">Retrievaller</span>

@@ -23,12 +23,3 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
-
-
-class ParseTaskResponse(BaseModel):
-    """提交文档解析任务后的响应结构。"""
-
-    message: str
-    document_id: str
-    task_id: str
-    status: str
