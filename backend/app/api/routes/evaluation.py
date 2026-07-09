@@ -10,7 +10,7 @@ from app.repositories.evaluation import (
     MySQLEvaluationRepository,
 )
 from app.repositories.qa_record import MySQLQaRecordRepository, QaRecordRepository
-from app.schemas.evaluation import EvaluationResponse
+from app.schemas.evaluation import EvaluationListResponse, EvaluationResponse
 from app.services.deepseek_service import (
     DEEPSEEK_API_KEY_NOT_CONFIGURED_MESSAGE,
     DeepSeekAPIError,
@@ -24,6 +24,7 @@ from app.services.evaluation import (
     QaRecordNotFoundError,
     create_evaluation_for_qa_record,
     get_evaluation_by_qa_record_id,
+    list_evaluations,
 )
 
 
@@ -52,6 +53,23 @@ def get_deepseek_service(
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
         model=settings.deepseek_model,
+    )
+
+
+@router.get("", response_model=EvaluationListResponse)
+async def list_evaluations_api(
+    evaluation_repository: Annotated[
+        EvaluationRepository,
+        Depends(get_evaluation_repository),
+    ],
+) -> EvaluationListResponse:
+    """查询 default_user 最近 50 条评估结果。"""
+    evaluations = await list_evaluations(evaluation_repository)
+    return EvaluationListResponse(
+        items=[
+            EvaluationResponse.model_validate(evaluation)
+            for evaluation in evaluations
+        ]
     )
 
 

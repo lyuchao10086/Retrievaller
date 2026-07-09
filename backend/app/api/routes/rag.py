@@ -18,10 +18,7 @@ from app.schemas.rag import (
     MultiKnowledgeBaseRagAnswerResponse,
     RagSuggestionsRequest,
     RagSuggestionsResponse,
-    RagAnswerRequest,
-    RagAnswerResponse,
 )
-from app.services.document import KnowledgeBaseNotFoundError
 from app.services.embedding_service import EmbeddingService, OllamaEmbeddingService
 from app.services.local_llm_service import (
     LOCAL_LLM_UNAVAILABLE_MESSAGE,
@@ -32,7 +29,6 @@ from app.services.local_llm_service import (
 from app.services.rag_service import (
     InvalidKnowledgeBasesError,
     answer_multi_knowledge_base_question,
-    answer_single_knowledge_base_question,
 )
 from app.services.qa_record import (
     create_qa_record,
@@ -43,10 +39,6 @@ from app.services.qa_record import (
 from app.services.vector_service import MilvusVectorService, VectorService
 
 
-router = APIRouter(
-    prefix="/api/knowledge-bases/{kb_id}/rag",
-    tags=["rag"],
-)
 multi_router = APIRouter(
     prefix="/api/rag",
     tags=["rag"],
@@ -111,60 +103,6 @@ def get_local_llm_service(
         model_name=settings.local_llm_model,
         base_url=settings.ollama_base_url,
     )
-
-
-@router.post("/answer", response_model=RagAnswerResponse)
-async def answer_single_knowledge_base_api(
-    kb_id: str,
-    payload: RagAnswerRequest,
-    knowledge_base_repository: Annotated[
-        KnowledgeBaseRepository,
-        Depends(get_knowledge_base_repository),
-    ],
-    document_repository: Annotated[
-        DocumentRepository,
-        Depends(get_document_repository),
-    ],
-    chunk_repository: Annotated[
-        ChunkRepository,
-        Depends(get_chunk_repository),
-    ],
-    embedding_service: Annotated[
-        EmbeddingService,
-        Depends(get_embedding_service),
-    ],
-    vector_service: Annotated[
-        VectorService,
-        Depends(get_vector_service),
-    ],
-    llm_service: Annotated[
-        LocalLLMService,
-        Depends(get_local_llm_service),
-    ],
-) -> RagAnswerResponse:
-    """单知识库 RAG 问答：检索当前 kb_id 下的 chunks，再调用本地 qwen3 总结。"""
-    try:
-        return await answer_single_knowledge_base_question(
-            knowledge_base_repository=knowledge_base_repository,
-            document_repository=document_repository,
-            chunk_repository=chunk_repository,
-            embedding_service=embedding_service,
-            vector_service=vector_service,
-            llm_service=llm_service,
-            kb_id=kb_id,
-            query=payload.query,
-            top_k=payload.top_k,
-        )
-    except KnowledgeBaseNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Knowledge base not found",
-        ) from exc
-    except LocalLLMUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=LOCAL_LLM_UNAVAILABLE_MESSAGE,
-        ) from exc
 
 
 @multi_router.post("/answer", response_model=MultiKnowledgeBaseRagAnswerResponse)

@@ -34,6 +34,14 @@ export type ParseTaskResponse = {
   status: DocumentStatus
 }
 
+export type ChunkSettingsPayload = {
+  separator?: string | null
+  chunk_size: number
+  chunk_overlap: number
+  replace_consecutive_whitespace: boolean
+  remove_urls_and_emails: boolean
+}
+
 export type ParsedSection = {
   level?: number
   title?: string | null

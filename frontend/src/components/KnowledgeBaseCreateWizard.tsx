@@ -13,11 +13,22 @@ import { ApiError } from "@/api/client"
 import { createKnowledgeBase } from "@/api/knowledgeBaseApi"
 import { uploadDocument } from "@/api/documentApi"
 import { cn } from "./ui/utils"
+import { NumberInput, RadioGroup, Section, TextInput, Toggle } from "./ui/ChunkSettingsComponents"
+
+type ChunkingMethod = "character" | "sentence" | "paragraph" | "recursive" | "semantic"
+
+const chunkingMethods: { value: ChunkingMethod; label: string; disabled?: boolean }[] = [
+  { value: "character", label: "按字符" },
+  { value: "sentence", label: "按句子（后续支持）", disabled: true },
+  { value: "paragraph", label: "按段落（后续支持）", disabled: true },
+  { value: "recursive", label: "递归分割（后续支持）", disabled: true },
+  { value: "semantic", label: "语义分割（后续支持）", disabled: true },
+]
 
 const steps = [
   { key: "source", label: "选择数据源" },
   { key: "chunk", label: "文本分段与清洗" },
-  { key: "finish", label: "处理并完成" }
+  { key: "finish", label: "创建并上传" }
 ] as const
 
 type WizardProps = {
@@ -32,6 +43,13 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
   const [chunkSize, setChunkSize] = useState(500)
   const [chunkOverlap, setChunkOverlap] = useState(50)
   const [separator, setSeparator] = useState("\\n\\n")
+  const [chunkingMethod, setChunkingMethod] = useState<ChunkingMethod>("character")
+  const [respectSentenceBoundary, setRespectSentenceBoundary] = useState(false)
+  const [respectWordBoundary, setRespectWordBoundary] = useState(false)
+  const [replaceConsecutiveWhitespace, setReplaceConsecutiveWhitespace] = useState(false)
+  const [removeUrlsAndEmails, setRemoveUrlsAndEmails] = useState(false)
+  const [minChunkSize, setMinChunkSize] = useState(100)
+  const [parentChildChunks, setParentChildChunks] = useState(false)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState("")
   const [created, setCreated] = useState(false)
@@ -47,7 +65,7 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
 
   const addFiles = (incoming: FileList | null) => {
     if (!incoming?.length) return
-    setFiles((prev) => [...prev, ...Array.from(incoming)])
+    setFiles((prev) => [...prev, ...Array.from(incoming).filter(isSupportedTextFile)])
   }
 
   const removeFile = (index: number) => {
@@ -131,6 +149,11 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
             <p className="mt-1 text-sm text-[#888]">
               「{name}」已创建{files.length > 0 ? `，${files.length} 个文档已上传` : ""}
             </p>
+            {files.length > 0 && (
+              <p className="mt-2 text-xs text-[#999]">
+                文档当前仅作为原始文件上传；分段、清洗与向量入库尚未在此流程中执行。
+              </p>
+            )}
             <button
               type="button"
               onClick={onBack}
@@ -143,8 +166,8 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
       ) : (
         <>
           {/* Step content */}
-          <div className="mx-6 mt-6">
-            <div className="rounded-xl border border-[#e8e8e8] bg-white p-6">
+          <div className="mx-6 mt-6 max-w-3xl">
+            <div className="max-h-[calc(100vh-220px)] overflow-y-auto rounded-xl border border-[#e8e8e8] bg-white p-6">
               {currentStep === 0 && (
                 <StepSource
                   files={files}
@@ -161,6 +184,20 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
                   setChunkOverlap={setChunkOverlap}
                   separator={separator}
                   setSeparator={setSeparator}
+                  chunkingMethod={chunkingMethod}
+                  setChunkingMethod={setChunkingMethod}
+                  respectSentenceBoundary={respectSentenceBoundary}
+                  setRespectSentenceBoundary={setRespectSentenceBoundary}
+                  respectWordBoundary={respectWordBoundary}
+                  setRespectWordBoundary={setRespectWordBoundary}
+                  replaceConsecutiveWhitespace={replaceConsecutiveWhitespace}
+                  setReplaceConsecutiveWhitespace={setReplaceConsecutiveWhitespace}
+                  removeUrlsAndEmails={removeUrlsAndEmails}
+                  setRemoveUrlsAndEmails={setRemoveUrlsAndEmails}
+                  minChunkSize={minChunkSize}
+                  setMinChunkSize={setMinChunkSize}
+                  parentChildChunks={parentChildChunks}
+                  setParentChildChunks={setParentChildChunks}
                 />
               )}
               {currentStep === 2 && (
@@ -172,6 +209,14 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
                   files={files}
                   chunkSize={chunkSize}
                   chunkOverlap={chunkOverlap}
+                  separator={separator}
+                  chunkingMethod={chunkingMethod}
+                  respectSentenceBoundary={respectSentenceBoundary}
+                  respectWordBoundary={respectWordBoundary}
+                  replaceConsecutiveWhitespace={replaceConsecutiveWhitespace}
+                  removeUrlsAndEmails={removeUrlsAndEmails}
+                  minChunkSize={minChunkSize}
+                  parentChildChunks={parentChildChunks}
                   creating={creating}
                   error={createError}
                 />
@@ -274,11 +319,12 @@ function StepSource({
       >
         <UploadCloud className="h-10 w-10 text-[#bbb]" />
         <p className="mt-3 text-sm font-medium text-[#555]">拖拽文件到此处，或点击上传</p>
-        <p className="mt-1 text-xs text-[#aaa]">支持 MD、PDF、DOCX、PNG 等格式</p>
+        <p className="mt-1 text-xs text-[#aaa]">当前支持 TXT、MD、MARKDOWN 文本文档</p>
       </button>
       <input
         ref={inputRef}
         type="file"
+        accept=".txt,.md,.markdown,text/plain,text/markdown"
         multiple
         className="hidden"
         onChange={(e) => addFiles(e.target.files)}
@@ -323,7 +369,21 @@ function StepChunk({
   chunkOverlap,
   setChunkOverlap,
   separator,
-  setSeparator
+  setSeparator,
+  chunkingMethod,
+  setChunkingMethod,
+  respectSentenceBoundary,
+  setRespectSentenceBoundary,
+  respectWordBoundary,
+  setRespectWordBoundary,
+  replaceConsecutiveWhitespace,
+  setReplaceConsecutiveWhitespace,
+  removeUrlsAndEmails,
+  setRemoveUrlsAndEmails,
+  minChunkSize,
+  setMinChunkSize,
+  parentChildChunks,
+  setParentChildChunks,
 }: {
   chunkSize: number
   setChunkSize: (v: number) => void
@@ -331,65 +391,142 @@ function StepChunk({
   setChunkOverlap: (v: number) => void
   separator: string
   setSeparator: (v: string) => void
+  chunkingMethod: ChunkingMethod
+  setChunkingMethod: (v: ChunkingMethod) => void
+  respectSentenceBoundary: boolean
+  setRespectSentenceBoundary: (v: boolean) => void
+  respectWordBoundary: boolean
+  setRespectWordBoundary: (v: boolean) => void
+  replaceConsecutiveWhitespace: boolean
+  setReplaceConsecutiveWhitespace: (v: boolean) => void
+  removeUrlsAndEmails: boolean
+  setRemoveUrlsAndEmails: (v: boolean) => void
+  minChunkSize: number
+  setMinChunkSize: (v: number) => void
+  parentChildChunks: boolean
+  setParentChildChunks: (v: boolean) => void
 }) {
   return (
-    <div className="space-y-5">
+    <div>
       <div>
         <h4 className="text-base font-semibold text-[#1f1f1f]">文本分段与清洗</h4>
         <p className="mt-1 text-sm text-[#999]">
-          配置文档切分策略，决定如何将文档拆分为可检索的文本块。
+          预设未来文档切分策略；当前不会影响上传后的后端处理结果。
+        </p>
+        <p className="mt-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">
+          当前配置仅作为创建向导内的预设草稿，不会随创建知识库或上传文件提交到后端。文档处理链路接入后，这些参数将用于切分与清洗。
         </p>
       </div>
 
-      <div className="space-y-4">
+      {/* 基础 */}
+      <Section title="基础">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-[#333]">
-            分段大小（字符数）
-          </label>
-          <input
-            type="number"
+          <TextInput
+            label="分隔符"
+            hint="优先按此分隔符切分文本，默认按双换行"
+            value={separator}
+            onChange={setSeparator}
+            placeholder="\\n\\n"
+            mono
+          />
+          <NumberInput
+            label="分段最大长度（字符数）"
+            hint="每个文本块的最大字符数，建议 200-1000"
             value={chunkSize}
-            onChange={(e) => setChunkSize(Number(e.target.value) || 0)}
+            onChange={setChunkSize}
             min={100}
             max={5000}
-            className="w-full rounded-lg border border-[#ddd] px-3 py-2.5 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
           />
-          <p className="mt-1 text-xs text-[#aaa]">每个文本块的最大字符数，建议 200-1000</p>
-        </div>
-
-        <div>
-          <label className="mb-1.5 block text-sm font-medium text-[#333]">
-            分段重叠（字符数）
-          </label>
-          <input
-            type="number"
+          <NumberInput
+            label="分段重叠长度（字符数）"
+            hint="相邻文本块的重叠字符数，有助于保持上下文连贯"
             value={chunkOverlap}
-            onChange={(e) => setChunkOverlap(Number(e.target.value) || 0)}
+            onChange={setChunkOverlap}
             min={0}
             max={500}
-            className="w-full rounded-lg border border-[#ddd] px-3 py-2.5 text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
           />
-          <p className="mt-1 text-xs text-[#aaa]">相邻文本块的重叠字符数，有助于保持上下文连贯</p>
         </div>
+      </Section>
 
+      {/* 分段 */}
+      <Section title="分段">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-[#333]">
-            分隔符
-          </label>
-          <input
-            value={separator}
-            onChange={(e) => setSeparator(e.target.value)}
-            placeholder="\\n\\n"
-            className="w-full rounded-lg border border-[#ddd] px-3 py-2.5 font-mono text-sm text-[#1f1f1f] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          <RadioGroup
+            label="分段方式"
+            hint="选择文本切分的策略"
+            options={chunkingMethods}
+            value={chunkingMethod}
+            onChange={(v) => setChunkingMethod(v as ChunkingMethod)}
           />
-          <p className="mt-1 text-xs text-[#aaa]">优先按此分隔符切分文本，默认按双换行</p>
+          <Toggle
+            label="尊重句子边界"
+            hint="避免在句子中间切断，保持句子完整性"
+            checked={respectSentenceBoundary}
+            onChange={setRespectSentenceBoundary}
+            disabled
+          />
+          <Toggle
+            label="尊重词边界"
+            hint="避免在单词中间切断（对英文等语言重要）"
+            checked={respectWordBoundary}
+            onChange={setRespectWordBoundary}
+            disabled
+          />
         </div>
-      </div>
+      </Section>
+
+      {/* 清洗 */}
+      <Section title="清洗">
+        <div>
+          <Toggle
+            label="替换连续空白字符"
+            hint="将连续的空格、换行符和制表符合并为单个空格"
+            checked={replaceConsecutiveWhitespace}
+            onChange={setReplaceConsecutiveWhitespace}
+          />
+          <Toggle
+            label="删除 URL 和电子邮件地址"
+            hint="移除文本中的 URL 链接和电子邮件地址"
+            checked={removeUrlsAndEmails}
+            onChange={setRemoveUrlsAndEmails}
+          />
+        </div>
+      </Section>
+
+      {/* 高级 */}
+      <Section title="高级" defaultOpen={false}>
+        <div>
+          <NumberInput
+            label="最小分段大小（字符数）"
+            hint="低于此值的文本块会与下一段合并，避免过短片段"
+            value={minChunkSize}
+            onChange={setMinChunkSize}
+            min={0}
+            max={500}
+            disabled
+          />
+          <Toggle
+            label="父子块关系"
+            hint="建立层级块关系，父块用于粗检索，子块用于精检索"
+            checked={parentChildChunks}
+            onChange={setParentChildChunks}
+            disabled
+          />
+        </div>
+      </Section>
     </div>
   )
 }
 
 /* ─── Step 2: Basic Info + Review & Create ─── */
+const chunkingMethodLabels: Record<ChunkingMethod, string> = {
+  character: "按字符",
+  sentence: "按句子",
+  paragraph: "按段落",
+  recursive: "递归分割",
+  semantic: "语义分割",
+}
+
 function StepFinish({
   name,
   setName,
@@ -398,6 +535,14 @@ function StepFinish({
   files,
   chunkSize,
   chunkOverlap,
+  separator,
+  chunkingMethod,
+  respectSentenceBoundary,
+  respectWordBoundary,
+  replaceConsecutiveWhitespace,
+  removeUrlsAndEmails,
+  minChunkSize,
+  parentChildChunks,
   creating,
   error
 }: {
@@ -408,6 +553,14 @@ function StepFinish({
   files: File[]
   chunkSize: number
   chunkOverlap: number
+  separator: string
+  chunkingMethod: ChunkingMethod
+  respectSentenceBoundary: boolean
+  respectWordBoundary: boolean
+  replaceConsecutiveWhitespace: boolean
+  removeUrlsAndEmails: boolean
+  minChunkSize: number
+  parentChildChunks: boolean
   creating: boolean
   error: string
 }) {
@@ -416,7 +569,7 @@ function StepFinish({
       <div>
         <h4 className="text-base font-semibold text-[#1f1f1f]">确认并创建</h4>
         <p className="mt-1 text-sm text-[#999]">
-          填写知识库名称并检查配置信息，确认无误后点击创建。
+          填写知识库名称并检查信息，确认无误后创建知识库并上传原始文件。
         </p>
       </div>
 
@@ -465,14 +618,25 @@ function StepFinish({
             ))}
           </div>
         )}
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+          以下分段与清洗配置当前仅为前端草稿，不会影响本次上传后的后端处理结果。
+        </div>
+        <SummaryRow label="分段方式" value={chunkingMethodLabels[chunkingMethod]} />
+        <SummaryRow label="分隔符" value={separator || "（默认）"} />
         <SummaryRow label="分段大小" value={`${chunkSize} 字符`} />
         <SummaryRow label="分段重叠" value={`${chunkOverlap} 字符`} />
+        <SummaryRow label="最小分段大小" value={`${minChunkSize} 字符（后续支持）`} />
+        <SummaryRow label="尊重句子边界" value={respectSentenceBoundary ? "是（后续支持）" : "否（后续支持）"} />
+        <SummaryRow label="尊重词边界" value={respectWordBoundary ? "是（后续支持）" : "否（后续支持）"} />
+        <SummaryRow label="替换连续空白" value={replaceConsecutiveWhitespace ? "是" : "否"} />
+        <SummaryRow label="删除 URL 和邮箱" value={removeUrlsAndEmails ? "是" : "否"} />
+        <SummaryRow label="父子块关系" value={parentChildChunks ? "启用（后续支持）" : "关闭（后续支持）"} />
       </div>
 
       {creating && (
         <div className="flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
           <Loader2 className="h-4 w-4 animate-spin" />
-          正在创建知识库并上传文档，请稍候...
+          正在创建知识库并上传原始文件，请稍候...
         </div>
       )}
     </div>
@@ -493,4 +657,17 @@ function formatBytes(value?: number | null) {
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
   return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function isSupportedTextFile(file: File) {
+  const name = file.name.toLowerCase()
+  const type = file.type.toLowerCase()
+  return (
+    name.endsWith(".txt") ||
+    name.endsWith(".md") ||
+    name.endsWith(".markdown") ||
+    type === "text/plain" ||
+    type === "text/markdown" ||
+    type === "text/x-markdown"
+  )
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Activity, FileJson, FilePlus2, FolderInput, RefreshCw, Trash2, UploadCloud } from "lucide-react"
+import { FileJson, FilePlus2, FolderInput, RefreshCw, Trash2, UploadCloud } from "lucide-react"
 import PageHeader from "./PageHeader"
 import ConfirmDialog from "./ui/ConfirmDialog"
 import { Badge } from "./ui/badge"
@@ -8,41 +8,25 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
 import { Select } from "./ui/select"
-import { Switch } from "./ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table"
 import { ApiError } from "@/api/client"
 import { listKnowledgeBases } from "@/api/knowledgeBaseApi"
 import {
   deleteDocument,
-  getParsedDocument,
   listDocuments,
-  parseDocument,
   uploadDocument
 } from "@/api/documentApi"
 import type { DocumentRecord } from "@/types/document"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
-
-const statusVariant: Record<string, "warning" | "processing" | "success" | "destructive" | "secondary"> = {
-  uploaded: "warning",
-  parsing: "processing",
-  parsed: "success",
-  chunked: "success",
-  embedded: "success",
-  failed: "destructive",
-  deleted: "secondary"
-}
+import { getDocumentStatusLabel, getDocumentStatusTone } from "./knowledgeBaseDetailUtils"
 
 export default function UploadPage() {
-  const [autoOcr, setAutoOcr] = useState(true)
-  const [autoKb, setAutoKb] = useState(true)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [selectedKbId, setSelectedKbId] = useState("")
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [loading, setLoading] = useState(false)
-  const [workingId, setWorkingId] = useState<string | null>(null)
   const [message, setMessage] = useState("")
   const [error, setError] = useState("")
-  const [parsedJson, setParsedJson] = useState("")
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -98,34 +82,25 @@ export default function UploadPage() {
 
   const addFiles = async (incoming: FileList | null) => {
     if (!incoming?.length || !selectedKbId) return
+    const files = Array.from(incoming).filter(isSupportedTextFile)
+    if (files.length === 0) {
+      setError("当前仅支持上传 TXT、MD、MARKDOWN 文本文件")
+      return
+    }
     setError("")
     setMessage("")
     setLoading(true)
     try {
-      for (const file of Array.from(incoming)) {
+      for (const file of files) {
         await uploadDocument(selectedKbId, file)
       }
-      setMessage("文件已上传")
+      setMessage("文件已上传，尚未完成分段与向量入库")
       await refreshDocuments(selectedKbId)
     } catch (unknownError) {
       showError(unknownError)
     } finally {
       setLoading(false)
       if (inputRef.current) inputRef.current.value = ""
-    }
-  }
-
-  const submitParse = async (document: DocumentRecord) => {
-    setWorkingId(document.id)
-    setError("")
-    try {
-      await parseDocument(selectedKbId, document.id)
-      setMessage("解析任务已提交")
-      await refreshDocuments(selectedKbId)
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setWorkingId(null)
     }
   }
 
@@ -149,24 +124,11 @@ export default function UploadPage() {
     }
   }
 
-  const previewParsed = async (document: DocumentRecord) => {
-    setWorkingId(document.id)
-    setError("")
-    try {
-      const data = await getParsedDocument(selectedKbId, document.id)
-      setParsedJson(JSON.stringify(data, null, 2))
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setWorkingId(null)
-    }
-  }
-
   return (
     <section>
       <PageHeader
         title="文档上传"
-        description="模拟将指定目录下的 PDF、图片、DOCX、TXT 文档上传到原始文件存储区，并按配置自动触发 OCR 和知识库入库流程。"
+        description="上传 TXT、MD、MARKDOWN 原始文件到知识库；分段、清洗与向量入库状态以后端实际接入能力为准。"
       />
 
       {(message || error) && (
@@ -180,7 +142,7 @@ export default function UploadPage() {
         <Card>
           <CardHeader>
             <CardTitle>上传区域</CardTitle>
-            <CardDescription>当前后端已支持 Markdown 原文上传与后续解析</CardDescription>
+            <CardDescription>当前支持上传 TXT/MD 原始文件，分段与入库处理待接入</CardDescription>
           </CardHeader>
           <CardContent>
             <button
@@ -197,15 +159,22 @@ export default function UploadPage() {
               <UploadCloud className="h-12 w-12 text-primary" />
               <p className="mt-4 text-lg font-semibold">拖拽文件到此处，或点击上传</p>
               <p className="mt-2 text-sm text-muted-foreground">
-                {selectedKbId ? "文件会保存到 MinIO，并在当前知识库下生成文档记录" : "请先选择或创建知识库"}
+                {selectedKbId ? "文件会保存到 MinIO；分段、清洗与向量入库暂未在上传时执行" : "请先选择或创建知识库"}
               </p>
               <div className="mt-5 flex flex-wrap justify-center gap-2">
-                {["MD", "MARKDOWN", "PDF", "PNG", "DOCX"].map((type) => (
+                {["TXT", "MD", "MARKDOWN"].map((type) => (
                   <Badge key={type} variant="purple">{type}</Badge>
                 ))}
               </div>
             </button>
-            <input ref={inputRef} type="file" multiple className="hidden" onChange={(e) => void addFiles(e.target.files)} />
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".txt,.md,.markdown,text/plain,text/markdown"
+              multiple
+              className="hidden"
+              onChange={(e) => void addFiles(e.target.files)}
+            />
           </CardContent>
         </Card>
 
@@ -230,17 +199,17 @@ export default function UploadPage() {
             </div>
             <div className="flex items-center justify-between rounded-lg border p-4">
               <div>
-                <p className="text-sm font-medium">是否自动 OCR 解析</p>
-                <p className="text-xs text-muted-foreground">当前阶段仅支持 Markdown 解析</p>
+                <p className="text-sm font-medium">分段与向量入库</p>
+                <p className="text-xs text-muted-foreground">当前上传页不提交分段清洗配置；处理状态请以文档列表为准</p>
               </div>
-              <Switch checked={autoOcr} onCheckedChange={setAutoOcr} label="自动 OCR" />
+              <Badge variant="secondary">待接入</Badge>
             </div>
             <div className="flex items-center justify-between rounded-lg border p-4">
               <div>
-                <p className="text-sm font-medium">是否自动加入知识库</p>
-                <p className="text-xs text-muted-foreground">当前由按钮手动触发解析、切分和向量化</p>
+                <p className="text-sm font-medium">支持的文件类型</p>
+                <p className="text-xs text-muted-foreground">当前最小闭环只支持纯文本，不接收 PDF/DOCX/图片</p>
               </div>
-              <Switch checked={autoKb} onCheckedChange={setAutoKb} label="自动入库" />
+              <Badge variant="secondary">TXT / MD</Badge>
             </div>
           </CardContent>
         </Card>
@@ -296,7 +265,9 @@ export default function UploadPage() {
                     <TableCell>{formatBytes(document.file_size)}</TableCell>
                     <TableCell>{formatDate(document.created_at)}</TableCell>
                     <TableCell>
-                      <Badge variant={statusVariant[document.status] ?? "secondary"}>{document.status}</Badge>
+                      <Badge variant={getDocumentStatusTone(document.status)}>
+                        {getDocumentStatusLabel(document.status)}
+                      </Badge>
                     </TableCell>
                     <TableCell className="max-w-[280px] text-xs text-muted-foreground">
                       {document.error_message || document.task_id || "-"}
@@ -304,18 +275,18 @@ export default function UploadPage() {
                     <TableCell>
                       <div className="flex justify-end gap-2">
                         {document.status === "uploaded" && (
-                          <Button size="sm" onClick={() => void submitParse(document)} disabled={workingId === document.id}>
-                            <Activity className="h-4 w-4" />
-                            解析
+                          <Button size="sm" disabled title="后端解析、分段与向量入库流程待接入">
+                            <FileJson className="h-4 w-4" />
+                            解析待接入
                           </Button>
                         )}
                         {document.status === "parsed" && (
-                          <Button size="sm" variant="outline" onClick={() => void previewParsed(document)} disabled={workingId === document.id}>
+                          <Button size="sm" variant="outline" disabled title="解析结果查看待正式接入处理流程">
                             <FileJson className="h-4 w-4" />
-                            解析结果
+                            解析结果待接入
                           </Button>
                         )}
-                        <Button size="sm" variant="ghost" onClick={() => void removeDocument(document)} disabled={workingId === document.id}>
+                        <Button size="sm" variant="ghost" onClick={() => void removeDocument(document)}>
                           <Trash2 className="h-4 w-4 text-red-600" />
                         </Button>
                       </div>
@@ -325,11 +296,6 @@ export default function UploadPage() {
               )}
             </TableBody>
           </Table>
-          {parsedJson && (
-            <pre className="mt-4 max-h-[360px] overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-5 text-white">
-              {parsedJson}
-            </pre>
-          )}
         </CardContent>
       </Card>
       <ConfirmDialog
@@ -344,6 +310,19 @@ export default function UploadPage() {
         onCancel={() => setDeleteTarget(null)}
       />
     </section>
+  )
+}
+
+function isSupportedTextFile(file: File) {
+  const name = file.name.toLowerCase()
+  const type = file.type.toLowerCase()
+  return (
+    name.endsWith(".txt") ||
+    name.endsWith(".md") ||
+    name.endsWith(".markdown") ||
+    type === "text/plain" ||
+    type === "text/markdown" ||
+    type === "text/x-markdown"
   )
 }
 

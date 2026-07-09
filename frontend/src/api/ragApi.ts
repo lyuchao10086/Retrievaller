@@ -4,20 +4,8 @@ import type {
   MultiRagAnswerResponse,
   QaRecord,
   RagSuggestionsRequest,
-  RagSuggestionsResponse,
-  RagAnswerRequest,
-  RagAnswerResponse
+  RagSuggestionsResponse
 } from "@/types/rag"
-
-export function answerKnowledgeBaseQuestion(
-  kbId: string,
-  payload: RagAnswerRequest
-) {
-  return request<RagAnswerResponse>(`/api/knowledge-bases/${kbId}/rag/answer`, {
-    method: "POST",
-    body: payload
-  })
-}
 
 export function answerQuestionAcrossKnowledgeBases(payload: MultiRagAnswerRequest, signal?: AbortSignal) {
   return request<MultiRagAnswerResponse>("/api/rag/answer", {

@@ -85,6 +85,16 @@ class DocumentRepository(Protocol):
     ) -> list[Document]:
         raise NotImplementedError
 
+    async def rename_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        new_file_name: str,
+        updated_at: datetime,
+    ) -> Document | None:
+        raise NotImplementedError
+
 
 class MySQLDocumentRepository:
     """文档持久化的 MySQL 实现。"""
@@ -466,6 +476,38 @@ class MySQLDocumentRepository:
             )
             rows = await cursor.fetchall()
         return [self._from_row(row) for row in rows]
+
+    async def rename_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        new_file_name: str,
+        updated_at: datetime,
+    ) -> Document | None:
+        """重命名指定文档的文件名。"""
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE documents
+                SET file_name = %s, updated_at = %s
+                WHERE id = %s
+                  AND user_id = %s
+                  AND knowledge_base_id = %s
+                  AND status != 'deleted'
+                """,
+                (new_file_name, updated_at, document_id, user_id, knowledge_base_id),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+
+        if affected_rows == 0:
+            return None
+        return await self.get_by_id_and_knowledge_base(
+            user_id,
+            knowledge_base_id,
+            document_id,
+        )
 
     @staticmethod
     def _from_row(row: dict[str, object]) -> Document:

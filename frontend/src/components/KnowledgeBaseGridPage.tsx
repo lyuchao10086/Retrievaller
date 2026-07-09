@@ -9,9 +9,11 @@ import {
 } from "@/api/knowledgeBaseApi"
 import { listDocuments } from "@/api/documentApi"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
+import type { DocumentRecord } from "@/types/document"
 import { cn } from "./ui/utils"
 import ConfirmDialog from "./ui/ConfirmDialog"
 import KnowledgeBaseDetailPage from "./KnowledgeBaseDetailPage"
+import ChunkSettingsPage from "./ChunkSettingsPage"
 
 type KbWithDocCount = KnowledgeBase & { docCount: number }
 
@@ -51,6 +53,7 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
   const [deleteTarget, setDeleteTarget] = useState<KnowledgeBase | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [selectedKb, setSelectedKb] = useState<KnowledgeBase | null>(null)
+  const [chunkSettingsDoc, setChunkSettingsDoc] = useState<DocumentRecord | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
 
   const loadKnowledgeBases = async () => {
@@ -150,6 +153,15 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
     return () => document.removeEventListener("mousedown", handleClickOutside)
   }, [])
 
+  if (chunkSettingsDoc && selectedKb) {
+    return (
+      <ChunkSettingsPage
+        document={chunkSettingsDoc}
+        onBack={() => setChunkSettingsDoc(null)}
+      />
+    )
+  }
+
   if (selectedKb) {
     return (
       <KnowledgeBaseDetailPage
@@ -158,6 +170,7 @@ export default function KnowledgeBaseGridPage({ onNavigate }: Props) {
           setSelectedKb(null)
           void loadKnowledgeBases()
         }}
+        onChunkSettings={(document) => setChunkSettingsDoc(document)}
       />
     )
   }

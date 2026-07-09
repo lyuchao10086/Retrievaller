@@ -48,6 +48,31 @@ def test_delete_qa_record_hard_deletes_default_user_record():
     assert other_user in repository.items
 
 
+def test_rag_records_api_lists_default_user_records():
+    target = make_qa_record("qa_target", DEFAULT_USER_ID)
+    other_user = make_qa_record("qa_other", "other_user")
+    repository = InMemoryQaRecordRepository([target, other_user])
+
+    app.dependency_overrides[get_qa_record_repository] = lambda: repository
+    try:
+        response = TestClient(app).get("/api/rag/records")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": target.id,
+            "title": target.title,
+            "question": target.question,
+            "answer": target.answer,
+            "knowledge_base_ids": target.knowledge_base_ids,
+            "sources_json": target.sources_json,
+            "created_at": target.created_at.isoformat(),
+        }
+    ]
+
+
 def test_rag_records_api_can_hard_delete_record_by_id():
     target = make_qa_record("qa_target", DEFAULT_USER_ID)
     repository = InMemoryQaRecordRepository([target])

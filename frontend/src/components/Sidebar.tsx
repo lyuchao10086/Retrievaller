@@ -26,18 +26,20 @@ type SidebarProps = {
   active: MenuKey
   collapsed: boolean
   onChange: (key: MenuKey) => void
+  onSelectHistory?: (record: QaRecord) => void
 }
 
 type HistoryItem = {
   id: string
   title: string
   pinned: boolean
+  record: QaRecord
   createdAt?: string
 }
 
 const HIDDEN_HISTORY_IDS_STORAGE_KEY = "retrievaller_hidden_qa_record_ids"
 
-export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
+export default function Sidebar({ active, collapsed, onChange, onSelectHistory }: SidebarProps) {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [moreFlyoutOpen, setMoreFlyoutOpen] = useState(false)
   const [moreButtonRect, setMoreButtonRect] = useState<{ x: number; y: number; h: number } | null>(null)
@@ -285,7 +287,9 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
             >
               <button
                 type="button"
-                onClick={() => onChange("chat")}
+                onClick={() => {
+                  onSelectHistory?.(history.record)
+                }}
                 className="min-w-0 flex-1 truncate px-2 py-1.5 text-left"
               >
                 {history.title}
@@ -393,7 +397,10 @@ export default function Sidebar({ active, collapsed, onChange }: SidebarProps) {
         onClose={() => setSearchModalOpen(false)}
         histories={sortedHistories}
         onNewChat={() => onChange("chat")}
-        onSelectHistory={() => onChange("chat")}
+        onSelectHistory={(historyId) => {
+          const history = sortedHistories.find((item) => item.id === historyId)
+          if (history) onSelectHistory?.(history.record)
+        }}
       />
     </aside>
   )
@@ -436,6 +443,7 @@ function mergeHistoryPins(records: QaRecord[], current: HistoryItem[]) {
     id: record.id,
     title: formatHistoryTitle(record),
     pinned: pinnedById.get(record.id) ?? false,
+    record,
     createdAt: record.created_at
   }))
 }

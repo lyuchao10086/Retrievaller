@@ -9,7 +9,7 @@ from app.api.routes.evaluation import router as evaluation_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge_base import router as knowledge_base_router
 from app.api.routes.rag import multi_router as multi_rag_router
-from app.api.routes.rag import router as rag_router
+from app.api.routes.system import router as system_router
 from app.core.config import get_settings
 from app.core.database import close_database, init_database
 
@@ -38,9 +38,9 @@ def create_app() -> FastAPI:
     application.include_router(health_router)
     application.include_router(knowledge_base_router)
     application.include_router(document_router)
-    application.include_router(rag_router)
     application.include_router(multi_rag_router)
     application.include_router(evaluation_router)
+    application.include_router(system_router)
     return application
 
 

@@ -19,26 +19,30 @@ export default function OCRPage() {
   return (
     <section>
       <PageHeader
-        title="OCR 解析"
-        description="展示 PaddleOCR 的识别配置、任务进度和解析结果预览，突出扫描件到结构化文本的转换过程。"
+        title="OCR 解析（演示）"
+        description="OCR 后端尚未接入，当前页面仅展示未来能力样例，不会提交真实识别任务。"
       />
+
+      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+        当前 OCR 配置、任务列表和结果预览均为演示数据；PDF、图片识别与 PaddleOCR 调用待后续接入。
+      </div>
 
       <div className="grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
         <Card>
           <CardHeader>
             <CardTitle>OCR 配置</CardTitle>
-            <CardDescription>PaddleOCR 识别参数</CardDescription>
+            <CardDescription>演示参数，当前不可提交到后端</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="space-y-2">
               <Label>OCR 引擎</Label>
-              <Select defaultValue="paddle">
+              <Select defaultValue="paddle" disabled>
                 <option value="paddle">PaddleOCR</option>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>语言模型</Label>
-              <Select defaultValue="mixed">
+              <Select defaultValue="mixed" disabled>
                 <option value="zh">中文</option>
                 <option value="en">英文</option>
                 <option value="mixed">中英混合</option>
@@ -52,7 +56,7 @@ export default function OCRPage() {
             ].map(([label, checked, setter]) => (
               <div key={label as string} className="flex items-center justify-between rounded-lg border p-4">
                 <span className="text-sm font-medium">{label as string}</span>
-                <Switch checked={checked as boolean} onCheckedChange={setter as (v: boolean) => void} label={label as string} />
+                <Switch checked={checked as boolean} onCheckedChange={setter as (v: boolean) => void} label={label as string} disabled />
               </div>
             ))}
           </CardContent>
@@ -61,7 +65,7 @@ export default function OCRPage() {
         <Card>
           <CardHeader>
             <CardTitle>OCR 任务列表</CardTitle>
-            <CardDescription>识别进度、置信度与处理状态</CardDescription>
+            <CardDescription>演示识别进度、置信度与处理状态</CardDescription>
           </CardHeader>
           <CardContent>
             <Table>
@@ -104,7 +108,7 @@ export default function OCRPage() {
       <Card className="mt-5">
         <CardHeader>
           <CardTitle>OCR 结果预览</CardTitle>
-          <CardDescription>左侧为文档页面模拟预览，右侧为识别文本与关键结果高亮</CardDescription>
+          <CardDescription>左侧为模拟预览，右侧为演示文本与关键结果高亮</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">

@@ -6,18 +6,20 @@ type SwitchProps = {
   onCheckedChange: (checked: boolean) => void
   className?: string
   label?: string
+  disabled?: boolean
 }
 
-export function Switch({ checked, onCheckedChange, className, label }: SwitchProps) {
+export function Switch({ checked, onCheckedChange, className, label, disabled = false }: SwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
         checked ? "bg-primary" : "bg-slate-300",
         className
       )}

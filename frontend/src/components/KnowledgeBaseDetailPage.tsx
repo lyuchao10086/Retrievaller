@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import {
   ArrowLeft,
   ChevronDown,
-  FileText,
   MoreHorizontal,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
+  Settings2,
   Trash2,
   X
 } from "lucide-react"
 import { ApiError } from "@/api/client"
-import { deleteDocument, listDocuments, uploadDocument } from "@/api/documentApi"
+import { deleteDocument, listDocuments, renameDocument, uploadDocument } from "@/api/documentApi"
 import { listQaRecords } from "@/api/ragApi"
 import type { DocumentRecord } from "@/types/document"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
@@ -20,16 +22,19 @@ import {
   buildDocumentRecallCounts,
   filterDocuments,
   formatCompactCount,
-  getDocumentAvailabilityLabel
+  getDocumentAvailabilityLabel,
+  getDocumentStatusLabel,
+  isDocumentRetrievable
 } from "./knowledgeBaseDetailUtils"
 import { cn } from "./ui/utils"
 
 type Props = {
   knowledgeBase: KnowledgeBase
   onBack: () => void
+  onChunkSettings?: (document: DocumentRecord) => void
 }
 
-export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props) {
+export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunkSettings }: Props) {
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [recallCounts, setRecallCounts] = useState<Record<string, number>>({})
   const [query, setQuery] = useState("")
@@ -40,12 +45,26 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DocumentRecord | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [renameTarget, setRenameTarget] = useState<DocumentRecord | null>(null)
+  const [renameValue, setRenameValue] = useState("")
+  const [renameLoading, setRenameLoading] = useState(false)
+  const [menuPosition, setMenuPosition] = useState<{ x: number; y: number; flipUp: boolean } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+  const menuButtonRefs = useRef<Map<string, HTMLButtonElement>>(new Map())
   const menuRef = useRef<HTMLDivElement>(null)
 
   const showError = (unknownError: unknown) => {
     setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
   }
+
+  // Auto-dismiss success message after 2 seconds
+  useEffect(() => {
+    if (!message) return
+    const timer = setTimeout(() => setMessage(""), 2000)
+    return () => clearTimeout(timer)
+  }, [message])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -80,13 +99,26 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+      const target = event.target as Node
+      const isMenuButton = menuButtonRefs.current.get(openMenuId ?? "")?.contains(target)
+      const isMenuContent = menuRef.current?.contains(target)
+      if (openMenuId && !isMenuButton && !isMenuContent) {
         setOpenMenuId(null)
+        setMenuPosition(null)
       }
     }
     document.addEventListener("mousedown", handleClickOutside)
     return () => document.removeEventListener("mousedown", handleClickOutside)
-  }, [])
+  }, [openMenuId])
+
+  // Focus rename input when dialog opens
+  useEffect(() => {
+    if (renameTarget) {
+      setRenameValue(renameTarget.file_name)
+      // Defer focus to next tick so the input is rendered
+      requestAnimationFrame(() => renameInputRef.current?.focus())
+    }
+  }, [renameTarget])
 
   const filteredDocuments = useMemo(
     () => filterDocuments(documents, query),
@@ -95,15 +127,20 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
 
   const addFiles = async (incoming: FileList | null) => {
     if (!incoming?.length) return
+    const files = Array.from(incoming).filter(isSupportedTextFile)
+    if (files.length === 0) {
+      setError("当前仅支持上传 TXT、MD、MARKDOWN 文本文件")
+      return
+    }
     setUploading(true)
     setError("")
     setMessage("")
     try {
-      for (const file of Array.from(incoming)) {
+      for (const file of files) {
         await uploadDocument(knowledgeBase.id, file)
       }
-      setMessage("文件已添加")
       await refresh()
+      setMessage("文件已上传，尚未完成分段与向量入库")
     } catch (unknownError) {
       showError(unknownError)
     } finally {
@@ -128,6 +165,66 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
       setDeleteLoading(false)
     }
   }
+
+  const confirmBatchDelete = async () => {
+    if (selectedIds.size === 0) return
+    setDeleteLoading(true)
+    setError("")
+    setMessage("")
+    try {
+      for (const id of Array.from(selectedIds)) {
+        await deleteDocument(knowledgeBase.id, id)
+      }
+      const count = selectedIds.size
+      setSelectedIds(new Set())
+      setDeleteTarget(null)
+      setMessage(`已删除 ${count} 个文件`)
+      await refresh()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setDeleteLoading(false)
+    }
+  }
+
+  const confirmRename = async () => {
+    if (!renameTarget || !renameValue.trim()) return
+    setRenameLoading(true)
+    setError("")
+    try {
+      await renameDocument(knowledgeBase.id, renameTarget.id, renameValue.trim())
+      setRenameTarget(null)
+      setMessage("重命名成功")
+      await refresh()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setRenameLoading(false)
+    }
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filteredDocuments.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(filteredDocuments.map((d) => d.id)))
+    }
+  }
+
+  const allSelected = filteredDocuments.length > 0 && selectedIds.size === filteredDocuments.length
+  const someSelected = selectedIds.size > 0
 
   return (
     <section className="min-h-full bg-white px-2 py-1 sm:px-0">
@@ -165,11 +262,21 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
           </div>
         </div>
         <div className="mt-[52px] flex items-center gap-2">
+          {someSelected && (
+            <button
+              type="button"
+              onClick={() => setDeleteTarget({ id: "__batch__" } as DocumentRecord)}
+              className="flex h-9 items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-600 transition hover:bg-red-100"
+            >
+              <Trash2 className="h-4 w-4" />
+              删除 ({selectedIds.size})
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void refresh()}
             disabled={loading}
-            className="hidden h-9 w-9 items-center justify-center rounded-lg text-[#64748b] transition hover:bg-[#f2f4f7] disabled:opacity-50 sm:flex"
+            className="flex h-9 w-9 items-center justify-center rounded-lg text-[#64748b] transition hover:bg-[#f2f4f7] disabled:opacity-50"
             title="刷新"
           >
             <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
@@ -186,6 +293,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
           <input
             ref={inputRef}
             type="file"
+            accept=".txt,.md,.markdown,text/plain,text/markdown"
             multiple
             className="hidden"
             onChange={(event) => void addFiles(event.target.files)}
@@ -213,7 +321,13 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
           <thead>
             <tr className="border-b border-[#edf0f4] text-left text-xs font-medium text-[#637083]">
               <th className="w-8 px-3 py-3">
-                <span className="sr-only">选择</span>
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={toggleSelectAll}
+                  aria-label="全选"
+                  className="h-4 w-4 rounded border-[#d0d7de] text-blue-600 focus:ring-blue-500"
+                />
               </th>
               <th className="w-8 px-0 py-3">
                 <span className="sr-only">序号</span>
@@ -252,12 +366,21 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
             ) : (
               filteredDocuments.map((document, index) => {
                 const availability = getDocumentAvailabilityLabel(document.status)
-                const available = availability === "可用"
+                const retrievable = isDocumentRetrievable(document.status)
+                const isSelected = selectedIds.has(document.id)
                 return (
-                  <tr key={document.id} className="border-b border-[#f1f3f6] text-[#1f2937] transition hover:bg-[#fafbfc]">
+                  <tr
+                    key={document.id}
+                    className={cn(
+                      "border-b border-[#f1f3f6] text-[#1f2937] transition",
+                      isSelected ? "bg-blue-50/60" : "hover:bg-[#fafbfc]"
+                    )}
+                  >
                     <td className="px-3 py-3">
                       <input
                         type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelect(document.id)}
                         aria-label={`选择 ${document.file_name}`}
                         className="h-4 w-4 rounded border-[#d0d7de] text-blue-600 focus:ring-blue-500"
                       />
@@ -275,53 +398,66 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
                     <td className="px-3 py-3 text-[#334155]">{recallCounts[document.id] ?? 0}</td>
                     <td className="px-3 py-3 text-[#334155]">{formatTableDate(document.created_at)}</td>
                     <td className="px-3 py-3">
-                      <span className="inline-flex items-center gap-1.5 text-sm text-[#1f2937]">
-                        <span className={cn("h-2 w-2 rounded-full", available ? "bg-emerald-500" : "bg-amber-400")} />
-                        {availability}
+                      <span
+                        className="inline-flex items-center gap-1.5 text-sm text-[#1f2937]"
+                        title={availability}
+                      >
+                        <span className={cn("h-2 w-2 rounded-full", retrievable ? "bg-emerald-500" : "bg-amber-400")} />
+                        {getDocumentStatusLabel(document.status)}
                       </span>
                     </td>
                     <td className="px-3 py-3">
                       <div className="flex items-center gap-3">
                         <span
                           role="switch"
-                          aria-checked={available}
+                          aria-checked={retrievable}
+                          aria-label={retrievable ? "已入库，可用于问答检索" : "尚未入库，暂不可检索"}
+                          title={retrievable ? "已入库，可用于问答检索" : "尚未完成分段与向量入库，暂不可检索"}
                           className={cn(
                             "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition",
-                            available ? "bg-blue-600" : "bg-[#cbd5e1]"
+                            retrievable ? "bg-blue-600" : "bg-[#cbd5e1]"
                           )}
                         >
                           <span
                             className={cn(
                               "block h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
-                              available ? "translate-x-4" : "translate-x-0.5"
+                              retrievable ? "translate-x-4" : "translate-x-0.5"
                             )}
                           />
                         </span>
-                        <div className="relative" ref={openMenuId === document.id ? menuRef : undefined}>
-                          <button
-                            type="button"
-                            onClick={() => setOpenMenuId(openMenuId === document.id ? null : document.id)}
-                            className="flex h-7 w-7 items-center justify-center rounded-md text-[#64748b] transition hover:bg-[#eef2f7] hover:text-[#111]"
-                            title="更多操作"
-                          >
-                            <MoreHorizontal className="h-4 w-4" />
-                          </button>
-                          {openMenuId === document.id && (
-                            <div className="absolute right-0 top-8 z-50 w-32 rounded-lg border border-[#e7e7e7] bg-white py-1 shadow-lg">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setOpenMenuId(null)
-                                  setDeleteTarget(document)
-                                }}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-500 transition hover:bg-red-50"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                                删除
-                              </button>
-                            </div>
-                          )}
-                        </div>
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            if (el) {
+                              menuButtonRefs.current.set(document.id, el)
+                            } else {
+                              menuButtonRefs.current.delete(document.id)
+                            }
+                          }}
+                          onClick={() => {
+                            const isOpen = openMenuId === document.id
+                            if (!isOpen) {
+                              const btn = menuButtonRefs.current.get(document.id)
+                              if (btn) {
+                                const rect = btn.getBoundingClientRect()
+                                const menuHeight = 130
+                                const shouldFlipUp = rect.bottom + menuHeight > window.innerHeight
+                                setMenuPosition({
+                                  x: rect.right,
+                                  y: shouldFlipUp ? rect.top - menuHeight : rect.bottom + 4,
+                                  flipUp: shouldFlipUp
+                                })
+                              }
+                            } else {
+                              setMenuPosition(null)
+                            }
+                            setOpenMenuId(isOpen ? null : document.id)
+                          }}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-[#64748b] transition hover:bg-[#eef2f7] hover:text-[#111]"
+                          title="更多操作"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -332,10 +468,69 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
         </table>
       </div>
 
+      {/* Dropdown menu rendered via portal to escape table overflow clipping */}
+      {openMenuId && menuPosition && createPortal(
+        (() => {
+          const menuDoc = documents.find((d) => d.id === openMenuId)
+          if (!menuDoc) return null
+          return (
+            <div
+              ref={menuRef}
+              className="fixed z-[9999] w-36 rounded-lg border border-[#e7e7e7] bg-white py-1 shadow-lg"
+              style={{
+                left: `${menuPosition.x}px`,
+                top: `${menuPosition.y}px`,
+                transform: "translateX(-100%)"
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenMenuId(null)
+                  setMenuPosition(null)
+                  setRenameTarget(menuDoc)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[#334155] transition hover:bg-[#f5f7fa]"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                重命名
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenMenuId(null)
+                  setMenuPosition(null)
+                  onChunkSettings?.(menuDoc)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[#334155] transition hover:bg-[#f5f7fa]"
+              >
+                <Settings2 className="h-3.5 w-3.5" />
+                分段设置（草稿）
+              </button>
+              <div className="my-1 border-t border-[#f0f0f0]" />
+              <button
+                type="button"
+                onClick={() => {
+                  setOpenMenuId(null)
+                  setMenuPosition(null)
+                  setDeleteTarget(menuDoc)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-500 transition hover:bg-red-50"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                删除
+              </button>
+            </div>
+          )
+        })(),
+        document.body
+      )}
+
+      {/* Single document delete dialog */}
       <ConfirmDialog
-        open={deleteTarget !== null}
+        open={deleteTarget !== null && deleteTarget.id !== "__batch__"}
         title="要删除该文件吗？"
-        description={deleteTarget ? `确认删除文件「${deleteTarget.file_name}」？此操作不可撤销。` : ""}
+        description={deleteTarget && deleteTarget.id !== "__batch__" ? `确认删除文件「${deleteTarget.file_name}」？此操作不可撤销。` : ""}
         confirmLabel="确认删除"
         cancelLabel="取消"
         danger
@@ -343,6 +538,73 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack }: Props
         onConfirm={() => void confirmDeleteDocument()}
         onCancel={() => setDeleteTarget(null)}
       />
+
+      {/* Batch delete dialog */}
+      <ConfirmDialog
+        open={deleteTarget !== null && deleteTarget.id === "__batch__"}
+        title="确认批量删除？"
+        description={`将删除选中的 ${selectedIds.size} 个文件，此操作不可撤销。`}
+        confirmLabel="确认删除"
+        cancelLabel="取消"
+        danger
+        loading={deleteLoading}
+        onConfirm={() => void confirmBatchDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
+
+      {/* Rename dialog */}
+      {renameTarget && (
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setRenameTarget(null)} />
+          <div className="relative z-10 w-full max-w-[420px] rounded-2xl border border-[#e7e7e7] bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.18)]">
+            <button
+              type="button"
+              onClick={() => setRenameTarget(null)}
+              className="absolute right-4 top-4 flex h-7 w-7 items-center justify-center rounded-lg text-[#999] transition hover:bg-[#f4f4f4]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <h3 className="text-lg font-semibold text-[#1f1f1f]">重命名文件</h3>
+            <p className="mt-2 text-sm leading-6 text-[#666]">
+              将「{renameTarget.file_name}」重命名为：
+            </p>
+            <input
+              ref={renameInputRef}
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  void confirmRename()
+                }
+                if (e.key === "Escape") {
+                  setRenameTarget(null)
+                }
+              }}
+              className="mt-4 w-full rounded-lg border border-[#ddd] px-3 py-2 text-sm text-[#1f2937] outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              placeholder="输入新文件名"
+            />
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRenameTarget(null)}
+                disabled={renameLoading}
+                className="rounded-lg border border-[#ddd] px-4 py-2 text-sm text-[#555] transition hover:bg-[#f5f5f5] disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmRename()}
+                disabled={renameLoading || !renameValue.trim()}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50"
+              >
+                {renameLoading ? "处理中..." : "确认"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -353,6 +615,19 @@ function FileTypeBadge({ fileName, fileType }: { fileName: string; fileType?: st
     <span className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-[3px] bg-blue-500 px-0.5 text-[8px] font-bold leading-none text-white">
       {extension}
     </span>
+  )
+}
+
+function isSupportedTextFile(file: File) {
+  const name = file.name.toLowerCase()
+  const type = file.type.toLowerCase()
+  return (
+    name.endsWith(".txt") ||
+    name.endsWith(".md") ||
+    name.endsWith(".markdown") ||
+    type === "text/plain" ||
+    type === "text/markdown" ||
+    type === "text/x-markdown"
   )
 }
 

@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import {
   ArrowUp,
-  Bot,
   Database,
   Globe2,
   PanelLeftClose,
@@ -11,7 +10,6 @@ import {
   Share2,
   Sparkles,
   StopCircle,
-  UserRound
 } from "lucide-react"
 import { ApiError } from "@/api/client"
 import { evaluateQaRecord } from "@/api/evaluationApi"
@@ -19,7 +17,8 @@ import { listKnowledgeBases } from "@/api/knowledgeBaseApi"
 import { answerQuestionAcrossKnowledgeBases, createRagSuggestions } from "@/api/ragApi"
 import type { Evaluation } from "@/types/evaluation"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
-import type { MultiRagSource } from "@/types/rag"
+import type { MultiRagSource, QaRecord } from "@/types/rag"
+import { restoreMessagesFromQaRecord } from "./chatHistoryUtils"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Textarea } from "./ui/textarea"
@@ -52,9 +51,11 @@ type Message = {
 type ChatPageProps = {
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
+  selectedQaRecord?: QaRecord | null
+  newChatToken?: number
 }
 
-export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPageProps) {
+export default function ChatPage({ sidebarCollapsed, onToggleSidebar, selectedQaRecord, newChatToken }: ChatPageProps) {
   const [messages, setMessages] = useState<Message[]>([])
   const [question, setQuestion] = useState("")
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
@@ -83,6 +84,25 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
     [selectedKnowledgeBases]
   )
   const noKbSelected = selectedKnowledgeBases.length === 0
+
+  useEffect(() => {
+    if (!selectedQaRecord) return
+    abortControllerRef.current?.abort()
+    setMessages(restoreMessagesFromQaRecord(selectedQaRecord))
+    setSelectedKbIds(selectedQaRecord.knowledge_base_ids)
+    setQuestion("")
+    setError("")
+    setLoading(false)
+  }, [selectedQaRecord])
+
+  useEffect(() => {
+    if (selectedQaRecord) return
+    abortControllerRef.current?.abort()
+    setMessages([])
+    setQuestion("")
+    setError("")
+    setLoading(false)
+  }, [newChatToken])
 
   useEffect(() => {
     let ignore = false
@@ -365,38 +385,32 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
               )}
             </div>
           ) : (
-            <div className="min-w-0 flex-1 space-y-6 py-8 pb-48">
+            <div className="mx-auto min-w-0 flex-1 space-y-10 py-10 pb-48 sm:w-full sm:max-w-[900px]">
               {messages.map((message, index) => (
-                <div key={`${message.role}-${index}`} className={message.role === "user" ? "flex justify-end" : "flex justify-start"}>
-                  <div
-                    className={
-                      message.role === "user"
-                        ? "max-w-full rounded-2xl bg-[#f4f4f4] p-4 text-[#111] sm:max-w-[78%]"
-                        : "max-w-full rounded-2xl border border-[#eeeeee] bg-white p-4 shadow-sm sm:max-w-[82%]"
-                    }
-                  >
-                    <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
-                      {message.role === "user" ? <UserRound className="h-4 w-4" /> : <Bot className="h-4 w-4 text-blue-600" />}
-                      {message.role === "user" ? "用户问题" : "AI 回答"}
+                message.role === "user" ? (
+                  <div key={`${message.role}-${index}`} className="flex justify-end">
+                    <div className="max-w-[70%] rounded-2xl bg-[#f4f4f4] px-4 py-3 text-[15px] leading-7 text-[#1f1f1f]">
+                      <p className="whitespace-pre-wrap">{message.content}</p>
                     </div>
-                    <p className="whitespace-pre-wrap text-sm leading-7">{message.content}</p>
-                    {message.role === "assistant" && (
-                      <>
-                        <AnswerEvaluation
-                          message={message}
-                          messageIndex={index}
-                          onEvaluate={evaluateMessage}
-                        />
-                        <SourceList sources={message.sources ?? []} />
-                      </>
-                    )}
                   </div>
-                </div>
+                ) : (
+                  <div key={`${message.role}-${index}`} className="flex justify-start">
+                    <div className="w-full max-w-3xl text-[#1f1f1f]">
+                      <AnswerContent content={message.content} />
+                      <AnswerEvaluation
+                        message={message}
+                        messageIndex={index}
+                        onEvaluate={evaluateMessage}
+                      />
+                      <SourcesDisclosure sources={message.sources ?? []} />
+                    </div>
+                  </div>
+                )
               ))}
               {loading && (
                 <div className="flex justify-start">
-                  <div className="rounded-2xl border border-[#eeeeee] bg-white p-4 text-sm text-muted-foreground shadow-sm">
-                    正在检索选中的知识库并调用本地 Qwen3...
+                  <div className="text-sm leading-7 text-muted-foreground">
+                    正在检索知识库并生成回答...
                   </div>
                 </div>
               )}
@@ -483,31 +497,52 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar }: ChatPage
   )
 }
 
-function SourceList({ sources }: { sources: MultiRagSource[] }) {
+function AnswerContent({ content }: { content: string }) {
+  return (
+    <div className="whitespace-pre-wrap text-[15px] leading-8 text-[#1f1f1f]">
+      {content}
+    </div>
+  )
+}
+
+function SourcesDisclosure({ sources }: { sources: MultiRagSource[] }) {
+  const [open, setOpen] = useState(false)
+
   if (sources.length === 0) {
     return (
-      <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm text-muted-foreground">
+      <div className="mt-4 text-xs text-muted-foreground">
         未返回引用来源。
       </div>
     )
   }
 
   return (
-    <div className="mt-4 space-y-3">
-      {sources.map((source, sourceIndex) => (
-        <div key={source.chunk_id} className="rounded-xl border border-blue-100 bg-blue-50/60 p-3 text-sm text-slate-700">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="font-semibold">引用来源 {sourceIndex + 1}</span>
-            <Badge variant="processing">score {source.score.toFixed(4)}</Badge>
-          </div>
-          <p>来源：{formatSource(source.source)}</p>
-          <p className="mt-1 text-xs text-muted-foreground">知识库 ID：{source.knowledge_base_id}</p>
-          <p className="mt-1 font-mono text-xs text-muted-foreground">Chunk ID：{source.chunk_id}</p>
-          <div className="mt-2 max-h-32 overflow-auto rounded-lg bg-white/70 p-3 leading-6 text-muted-foreground">
-            {source.content}
-          </div>
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="text-xs font-medium text-blue-600 transition hover:text-blue-700"
+      >
+        {open ? "收起引用来源" : `查看引用来源（${sources.length}）`}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2">
+          {sources.map((source, sourceIndex) => (
+            <div key={source.chunk_id} className="rounded-lg border border-[#ececec] bg-white px-3 py-2 text-xs text-slate-700">
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">来源 {sourceIndex + 1}</span>
+                <span className="text-muted-foreground">score {source.score.toFixed(4)}</span>
+              </div>
+              <p className="leading-6">来源：{formatSource(source.source)}</p>
+              <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">知识库 ID：{source.knowledge_base_id}</p>
+              <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">Chunk ID：{source.chunk_id}</p>
+              <div className="mt-2 max-h-28 overflow-auto rounded-md bg-[#fafafa] p-2 leading-6 text-muted-foreground">
+                {source.content}
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   )
 }
@@ -524,23 +559,24 @@ function AnswerEvaluation({
   if (!message.qaRecordId) return null
 
   return (
-    <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3 text-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground">
+    <div className="mt-4">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <span>
           记录 ID：<span className="font-mono">{message.qaRecordId}</span>
-        </div>
+        </span>
         <Button
           size="sm"
           variant="outline"
           onClick={() => void onEvaluate(messageIndex, message.qaRecordId as string)}
           disabled={message.evaluationLoading}
+          className="h-7 px-2 text-xs"
         >
           <Sparkles className="h-4 w-4" />
-          {message.evaluationLoading ? "正在调用 DeepSeek 评估..." : "立即评估"}
+          {message.evaluationLoading ? "评估中..." : "评估"}
         </Button>
       </div>
       {message.evaluationError && (
-        <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-700">
+        <div className="mt-2 text-xs text-red-600">
           {message.evaluationError}
         </div>
       )}
@@ -559,16 +595,15 @@ function EvaluationPanel({ evaluation }: { evaluation: Evaluation }) {
   ] as const
 
   return (
-    <div className="mt-4 space-y-3 rounded-xl border border-blue-100 bg-blue-50/50 p-4">
-      <div className="flex items-center gap-2 font-semibold text-slate-800">
-        <Sparkles className="h-4 w-4 text-blue-600" />
+    <div className="mt-3 space-y-3 rounded-lg border border-[#ececec] bg-[#fafafa] p-3 text-xs">
+      <div className="font-medium text-slate-800">
         DeepSeek 评估结果
       </div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         {scores.map(([label, score]) => (
-          <div key={label} className="rounded-lg bg-white/80 p-3">
+          <div key={label} className="rounded-md bg-white p-2">
             <div className="text-xs text-muted-foreground">{label}</div>
-            <div className="mt-1 text-lg font-semibold">{score}/5</div>
+            <div className="mt-1 font-semibold">{score}/5</div>
           </div>
         ))}
       </div>
@@ -578,7 +613,7 @@ function EvaluationPanel({ evaluation }: { evaluation: Evaluation }) {
           {evaluation.hallucination ? "存在幻觉" : "未发现明显幻觉"}
         </Badge>
       </div>
-      <div className="text-sm leading-7 text-muted-foreground">
+      <div className="leading-6 text-muted-foreground">
         <span className="font-medium text-slate-700">评估理由：</span>
         {evaluation.reason}
       </div>

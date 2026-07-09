@@ -11,16 +11,32 @@ import CitationPage from "./components/CitationPage"
 import EvaluationPage from "./components/EvaluationPage"
 import SettingsPage from "./components/SettingsPage"
 import type { MenuKey } from "./data/mockData"
+import type { QaRecord } from "./types/rag"
 
 export default function App() {
   const [active, setActive] = useState<MenuKey>("chat")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [selectedQaRecord, setSelectedQaRecord] = useState<QaRecord | null>(null)
+  const [newChatToken, setNewChatToken] = useState(0)
+
+  const navigate = (key: MenuKey) => {
+    if (key === "chat") {
+      setSelectedQaRecord(null)
+      setNewChatToken((value) => value + 1)
+    }
+    setActive(key)
+  }
+
+  const selectHistoryRecord = (record: QaRecord) => {
+    setSelectedQaRecord(record)
+    setActive("chat")
+  }
 
   const pageMap: Record<Exclude<MenuKey, "chat">, JSX.Element> = {
     upload: <UploadPage />,
     ocr: <OCRPage />,
-    knowledge: <KnowledgeBaseGridPage onNavigate={setActive} />,
-    kbCreate: <KnowledgeBaseCreateWizard onBack={() => setActive("knowledge")} />,
+    knowledge: <KnowledgeBaseGridPage onNavigate={navigate} />,
+    kbCreate: <KnowledgeBaseCreateWizard onBack={() => navigate("knowledge")} />,
     kbBuild: <KnowledgeBasePage />,
     qaRecords: <QaRecordsPage />,
     citations: <CitationPage />,
@@ -34,7 +50,8 @@ export default function App() {
         <Sidebar
           active={active}
           collapsed={sidebarCollapsed}
-          onChange={setActive}
+          onChange={navigate}
+          onSelectHistory={selectHistoryRecord}
         />
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-white">
           <div className={active === "chat" ? "h-screen min-w-0 overflow-x-hidden" : "mx-auto max-w-[1440px] p-4 lg:p-6"}>
@@ -42,6 +59,8 @@ export default function App() {
               <ChatPage
                 sidebarCollapsed={sidebarCollapsed}
                 onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+                selectedQaRecord={selectedQaRecord}
+                newChatToken={newChatToken}
               />
             ) : (
               pageMap[active]

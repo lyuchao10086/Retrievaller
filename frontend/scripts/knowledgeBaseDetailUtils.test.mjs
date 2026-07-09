@@ -26,7 +26,9 @@ const {
   buildDocumentRecallCounts,
   filterDocuments,
   formatCompactCount,
-  getDocumentAvailabilityLabel
+  getDocumentAvailabilityLabel,
+  getDocumentStatusLabel,
+  isDocumentRetrievable
 } = module.exports
 
 test("filters documents by file name and type", () => {
@@ -67,6 +69,14 @@ test("counts document recalls from qa record sources", () => {
 test("formats table metrics for compact display", () => {
   assert.equal(formatCompactCount(999), "999")
   assert.equal(formatCompactCount(19500), "19.5k")
-  assert.equal(getDocumentAvailabilityLabel("embedded"), "可用")
-  assert.equal(getDocumentAvailabilityLabel("failed"), "不可用")
+})
+
+test("labels uploaded documents as not yet retrievable", () => {
+  assert.equal(getDocumentStatusLabel("uploaded"), "已上传，待处理")
+  assert.equal(getDocumentAvailabilityLabel("uploaded"), "待处理")
+  assert.equal(isDocumentRetrievable("uploaded"), false)
+  assert.equal(getDocumentStatusLabel("embedded"), "已入库，可检索")
+  assert.equal(getDocumentAvailabilityLabel("embedded"), "可检索")
+  assert.equal(isDocumentRetrievable("embedded"), true)
+  assert.equal(getDocumentStatusLabel("failed"), "处理失败")
 })

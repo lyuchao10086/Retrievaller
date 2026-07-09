@@ -9,7 +9,7 @@ export default function Dashboard() {
     <section>
       <PageHeader
         title="项目概览"
-        description="从文档上传、PaddleOCR 解析、LangChain Retriever 构建，到带引用来源的 RAG 问答与质量评估，一屏掌握完整链路。"
+        description="查看当前已接入能力与后续规划；OCR、LangChain 构建等高级链路仍在待接入阶段。"
       />
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -33,7 +33,7 @@ export default function Dashboard() {
       <Card className="mt-5">
         <CardHeader>
           <CardTitle>文档智能解析 Pipeline</CardTitle>
-          <CardDescription>文档 → OCR → 文本 → 向量库 → 检索 → 生成回答 → 引用来源 → 评估</CardDescription>
+          <CardDescription>规划流程示意，部分步骤尚未接入真实后端</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -67,14 +67,14 @@ export default function Dashboard() {
             <CardDescription>面向个人与团队的可追溯智能文档知识库</CardDescription>
           </CardHeader>
           <CardContent className="text-sm leading-7 text-slate-700">
-            该系统用于将 PDF、图片、扫描件等非结构化文档转化为可检索、可问答、可评估的知识库。系统通过
-            PaddleOCR 提取文档文本，利用 LangChain 构建检索器，并基于 RAG 技术实现带引用来源的智能问答。
+            该系统目标是将文档转化为可检索、可问答、可评估的知识库。当前优先支持文本类文档与基础 RAG
+            问答；PDF、图片、PaddleOCR 与 LangChain 构建链路属于后续增强方向。
           </CardContent>
         </Card>
         <Card>
           <CardHeader>
             <CardTitle>今日质量快照</CardTitle>
-            <CardDescription>最近 256 次问答的综合表现</CardDescription>
+            <CardDescription>示例指标，真实统计待后续接入</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {[

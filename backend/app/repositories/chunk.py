@@ -8,6 +8,41 @@ from app.models.chunk import Chunk
 class ChunkRepository(Protocol):
     """chunk service 层依赖的数据存储接口约定。"""
 
+    async def replace_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        chunks: list[Chunk],
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
+    async def list_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
+    async def update_embedding_results(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        results: list[tuple[str, str]],
+        updated_at,
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
+    async def count_embedding_status(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> dict[str, int]:
+        raise NotImplementedError
+
     async def list_by_ids(
         self,
         user_id: str,
@@ -44,6 +79,174 @@ class MySQLChunkRepository:
 
     def __init__(self, connection: aiomysql.Connection):
         self.connection = connection
+
+    async def replace_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        chunks: list[Chunk],
+    ) -> list[Chunk]:
+        """删除指定文档旧 chunks，再批量写入新的切分结果。"""
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                DELETE FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND document_id = %s
+                """,
+                (user_id, knowledge_base_id, document_id),
+            )
+            if chunks:
+                await cursor.executemany(
+                    """
+                    INSERT INTO chunks (
+                        id,
+                        user_id,
+                        knowledge_base_id,
+                        document_id,
+                        chunk_index,
+                        title,
+                        content,
+                        chapter,
+                        section,
+                        subsection,
+                        status,
+                        vector_id,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            chunk.id,
+                            chunk.user_id,
+                            chunk.knowledge_base_id,
+                            chunk.document_id,
+                            chunk.chunk_index,
+                            chunk.title,
+                            chunk.content,
+                            chunk.chapter,
+                            chunk.section,
+                            chunk.subsection,
+                            chunk.status,
+                            chunk.vector_id,
+                            chunk.created_at,
+                            chunk.updated_at,
+                        )
+                        for chunk in chunks
+                    ],
+                )
+        await self.connection.commit()
+        return chunks
+
+    async def list_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> list[Chunk]:
+        """按文档列出全部 chunks，用于预览和 embedding。"""
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    knowledge_base_id,
+                    document_id,
+                    chunk_index,
+                    title,
+                    content,
+                    chapter,
+                    section,
+                    subsection,
+                    status,
+                    vector_id,
+                    created_at,
+                    updated_at
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND document_id = %s
+                ORDER BY chunk_index ASC
+                """,
+                (user_id, knowledge_base_id, document_id),
+            )
+            rows = await cursor.fetchall()
+        return [self._from_row(row) for row in rows]
+
+    async def update_embedding_results(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        results: list[tuple[str, str]],
+        updated_at,
+    ) -> list[Chunk]:
+        """写回 chunk 对应的 Milvus vector_id，并标记为 embedded。"""
+        if not results:
+            return await self.list_by_document(user_id, knowledge_base_id, document_id)
+
+        async with self.connection.cursor() as cursor:
+            await cursor.executemany(
+                """
+                UPDATE chunks
+                SET vector_id = %s,
+                    status = 'embedded',
+                    updated_at = %s
+                WHERE id = %s
+                  AND user_id = %s
+                  AND knowledge_base_id = %s
+                  AND document_id = %s
+                """,
+                [
+                    (
+                        vector_id,
+                        updated_at,
+                        chunk_id,
+                        user_id,
+                        knowledge_base_id,
+                        document_id,
+                    )
+                    for chunk_id, vector_id in results
+                ],
+            )
+        await self.connection.commit()
+        return await self.list_by_document(user_id, knowledge_base_id, document_id)
+
+    async def count_embedding_status(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> dict[str, int]:
+        """统计文档 chunks 的 embedding 进度。"""
+        async with self.connection.cursor(aiomysql.DictCursor) as cursor:
+            await cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_chunks,
+                    SUM(CASE WHEN status = 'embedded' AND vector_id IS NOT NULL THEN 1 ELSE 0 END)
+                        AS embedded_chunks
+                FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND document_id = %s
+                """,
+                (user_id, knowledge_base_id, document_id),
+            )
+            row = await cursor.fetchone()
+
+        total_chunks = int(row["total_chunks"] or 0)
+        embedded_chunks = int(row["embedded_chunks"] or 0)
+        return {
+            "total_chunks": total_chunks,
+            "embedded_chunks": embedded_chunks,
+            "pending_chunks": total_chunks - embedded_chunks,
+        }
 
     async def list_by_ids(
         self,
@@ -172,6 +375,7 @@ class MySQLChunkRepository:
             row = await cursor.fetchone()
         return row is not None
 
+    @staticmethod
     def _from_row(row: dict[str, object]) -> Chunk:
         """将 MySQL 行数据转换成内部实体。"""
         return Chunk(

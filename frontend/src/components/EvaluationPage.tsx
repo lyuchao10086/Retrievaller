@@ -18,9 +18,13 @@ export default function EvaluationPage() {
   return (
     <section>
       <PageHeader
-        title="系统评估"
-        description="围绕忠实度、相关性、上下文召回和引用准确率评估 RAG 系统，判断回答是否真实、忠实、准确。"
+        title="系统评估（示例）"
+        description="展示 RAG 质量评估维度与样例数据；真实单条问答评估请在问答记录页发起。"
       />
+
+      <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+        当前页面为评估指标展示样例，不会请求后端评估列表。已保存 QA 记录的 DeepSeek 评估入口位于“问答记录与评估”页面。
+      </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {metricCards.map((metric) => (
@@ -47,7 +51,7 @@ export default function EvaluationPage() {
               <BarChart3 className="h-5 w-5 text-primary" />
               评估维度分布
             </CardTitle>
-            <CardDescription>用进度条模拟柱状图展示各维度分数</CardDescription>
+            <CardDescription>示例分数，用于说明评估维度</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
             {dimensions.map((item) => (
@@ -90,7 +94,7 @@ export default function EvaluationPage() {
       <Card className="mt-5">
         <CardHeader>
           <CardTitle>评估样本表格</CardTitle>
-          <CardDescription>测试问题、标准答案、模型回答和人工评价</CardDescription>
+          <CardDescription>示例测试问题、标准答案、模型回答和人工评价</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>

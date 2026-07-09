@@ -1,31 +1,111 @@
-import { useState } from "react"
-import { Eye, EyeOff, Gauge, HardDrive, KeyRound, ScanText, Search } from "lucide-react"
+import { useEffect, useState } from "react"
+import { Gauge, HardDrive, KeyRound, RefreshCw, ScanText, Search, Server } from "lucide-react"
+import { ApiError } from "@/api/client"
+import { getHealth, getSystemConfig, type HealthDependencyStatus, type HealthResponse, type SystemConfigResponse } from "@/api/systemApi"
 import PageHeader from "./PageHeader"
+import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
 import { Select } from "./ui/select"
 import { Slider } from "./ui/slider"
-import { Switch } from "./ui/switch"
 
 const DEFAULT_TOP_K = 5
 const TOP_K_STORAGE_KEY = "retrievaller.defaultTopK"
+const HEALTH_DEPENDENCY_LABELS: Record<string, string> = {
+  mysql: "MySQL",
+  redis: "Redis",
+  minio: "MinIO",
+  milvus: "Milvus",
+  ollama_embedding: "Ollama Embedding",
+  ollama_llm: "Ollama LLM",
+  deepseek_config: "DeepSeek 配置",
+  celery_config: "Celery 配置",
+}
 
 export default function SettingsPage() {
-  const [showKey, setShowKey] = useState(false)
   const [temperature, setTemperature] = useState(0.2)
   const [topK, setTopK] = useState(() => readStoredTopK())
-  const [gpu, setGpu] = useState(true)
-  const [preprocess, setPreprocess] = useState(true)
-  const [rerank, setRerank] = useState(true)
+  const [config, setConfig] = useState<SystemConfigResponse | null>(null)
+  const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let ignore = false
+    async function loadConfig() {
+      try {
+        const data = await getSystemConfig()
+        if (!ignore) setConfig(data)
+      } catch (unknownError) {
+        if (!ignore) {
+          setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+        }
+      }
+    }
+    void loadConfig()
+    return () => {
+      ignore = true
+    }
+  }, [])
+
+  async function refreshHealth() {
+    setHealthLoading(true)
+    setError("")
+    try {
+      setHealth(await getHealth())
+    } catch (unknownError) {
+      setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+    } finally {
+      setHealthLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void refreshHealth()
+  }, [])
 
   return (
     <section>
       <PageHeader
         title="设置"
-        description="集中配置 LLM、OCR、存储和检索默认参数，为后续接入 FastAPI 后端保留清晰的数据结构。"
+        description="查看后端运行配置与前端检索偏好。敏感密钥只在服务端环境变量中配置。"
       />
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
+
+      <Card className="mb-5">
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Server className="h-5 w-5 text-primary" />
+              系统健康状态
+            </CardTitle>
+            <CardDescription>后端、中间件、Ollama 模型服务与可选配置状态</CardDescription>
+          </div>
+          <Button variant="outline" onClick={() => void refreshHealth()} disabled={healthLoading}>
+            <RefreshCw className="h-4 w-4" />
+            {healthLoading ? "刷新中..." : "刷新状态"}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            <HealthStatusTile label="Backend" status={health?.backend} />
+            {Object.entries(HEALTH_DEPENDENCY_LABELS).map(([key, label]) => (
+              <HealthStatusTile
+                key={key}
+                label={label}
+                status={health?.dependencies?.[key]}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-5 xl:grid-cols-2">
         <Card>
@@ -38,30 +118,24 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <Field label="LLM 模型名称">
-              <Select defaultValue="gpt">
-                <option value="gpt">gpt-4o-mini</option>
-                <option value="qwen">Qwen2.5</option>
-                <option value="glm">GLM-4</option>
-              </Select>
+              <Input readOnly value={config?.llm?.local_llm_model ?? "加载中..."} />
             </Field>
-            <Field label="API Key">
-              <div className="flex gap-2">
-                <Input type={showKey ? "text" : "password"} defaultValue="sk-xxxxxxxxxxxxxxxx" />
-                <Button type="button" variant="outline" size="icon" onClick={() => setShowKey(!showKey)} aria-label="切换 API Key 显示">
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </Button>
-              </div>
+            <Field label="Ollama 地址">
+              <Input readOnly value={config?.llm?.base_url ?? "加载中..."} />
+            </Field>
+            <Field label="Embedding 模型">
+              <Input readOnly value={config?.embedding?.model_name ?? config?.embedding?.embedding_model_name ?? "加载中..."} />
+            </Field>
+            <Field label="Embedding 维度">
+              <Input readOnly value={String(config?.embedding?.dimension ?? config?.embedding?.embedding_dimension ?? "") || "加载中..."} />
             </Field>
             <div>
               <div className="mb-2 flex items-center justify-between">
-                <Label>Temperature</Label>
+                <Label>前端展示 Temperature</Label>
                 <span className="text-sm font-semibold">{temperature.toFixed(2)}</span>
               </div>
               <Slider min={0} max={1} step={0.01} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
             </div>
-            <Field label="Max Tokens">
-              <Input type="number" defaultValue={2048} />
-            </Field>
           </CardContent>
         </Card>
 
@@ -69,20 +143,27 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <ScanText className="h-5 w-5 text-primary" />
-              OCR 配置
+              文档处理
             </CardTitle>
-            <CardDescription>PaddleOCR 运行参数</CardDescription>
+            <CardDescription>当前后台处理能力</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Field label="OCR 语言">
-              <Select defaultValue="mixed">
-                <option value="zh">中文</option>
-                <option value="en">英文</option>
-                <option value="mixed">中英混合</option>
-              </Select>
+            <Field label="处理模式">
+              <Input readOnly value={config?.document_processing?.mode ?? "加载中..."} />
             </Field>
-            <ToggleRow label="是否启用 GPU" checked={gpu} onChange={setGpu} />
-            <ToggleRow label="图片预处理开关" checked={preprocess} onChange={setPreprocess} />
+            <Field label="支持文件类型">
+              <Input readOnly value={config?.document_processing?.supported_file_types?.join(" / ") ?? "加载中..."} />
+            </Field>
+            <Field label="默认分段参数">
+              <Input
+                readOnly
+                value={
+                  config?.document_processing
+                    ? `${config.document_processing.default_chunk_size} 字符，重叠 ${config.document_processing.default_chunk_overlap}`
+                    : "加载中..."
+                }
+              />
+            </Field>
           </CardContent>
         </Card>
 
@@ -92,13 +173,15 @@ export default function SettingsPage() {
               <HardDrive className="h-5 w-5 text-primary" />
               存储配置
             </CardTitle>
-            <CardDescription>文件、OCR 文本、向量库与日志路径</CardDescription>
+            <CardDescription>对象存储和向量集合</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <Field label="原始文件存储路径"><Input defaultValue="/data/storage/raw/" /></Field>
-            <Field label="OCR 文本存储路径"><Input defaultValue="/data/storage/ocr_text/" /></Field>
-            <Field label="向量数据库路径"><Input defaultValue="/data/vectorstore/faiss/" /></Field>
-            <Field label="日志存储路径"><Input defaultValue="/data/logs/retrievaller/" /></Field>
+            <Field label="原始文件 Bucket"><Input readOnly value={config?.storage?.documents_bucket ?? "加载中..."} /></Field>
+            <Field label="解析结果 Bucket"><Input readOnly value={config?.storage?.parsed_results_bucket ?? "加载中..."} /></Field>
+            <Field label="Milvus Collection"><Input readOnly value={config?.storage?.milvus_collection ?? "加载中..."} /></Field>
+            <Field label="DeepSeek 评估">
+              <Input readOnly value={config?.evaluation ? `${config.evaluation.model} / ${config.evaluation.configured ? "已配置" : "未配置 API Key"}` : "加载中..."} />
+            </Field>
           </CardContent>
         </Card>
 
@@ -127,17 +210,19 @@ export default function SettingsPage() {
             <Field label="默认检索方式">
               <Select defaultValue="similarity">
                 <option value="similarity">相似度检索</option>
-                <option value="mmr">MMR</option>
-                <option value="hybrid">Hybrid Search</option>
               </Select>
             </Field>
-            <ToggleRow label="是否启用 Rerank" checked={rerank} onChange={setRerank} />
+            <Field label="Rerank 状态">
+              <Input readOnly value={config?.rerank?.enabled ? "已启用" : "未接入"} />
+            </Field>
             <div className="rounded-lg border bg-blue-50 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-blue-700">
                 <Gauge className="h-4 w-4" />
-                默认阈值建议
+                当前说明
               </div>
-              <p className="mt-2 text-sm leading-6 text-blue-700">制度类知识库建议 Score Threshold 不低于 0.7，并默认开启引用来源展示。</p>
+              <p className="mt-2 text-sm leading-6 text-blue-700">
+                RAG 请求会使用这里的默认 Top-K；模型、存储和 DeepSeek 密钥请在后端环境变量中配置。
+              </p>
             </div>
           </CardContent>
         </Card>
@@ -164,11 +249,36 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function ToggleRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+function HealthStatusTile({
+  label,
+  status,
+}: {
+  label: string
+  status?: HealthDependencyStatus
+}) {
+  const state = status?.status ?? "loading"
+  const detail = status?.detail || status?.error || status?.model || status?.broker || "-"
   return (
-    <div className="flex items-center justify-between rounded-lg border p-4">
-      <span className="text-sm font-medium">{label}</span>
-      <Switch checked={checked} onCheckedChange={onChange} label={label} />
+    <div className="rounded-lg border bg-white p-4">
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <div className="text-sm font-semibold">{label}</div>
+        <Badge variant={healthBadgeVariant(state)}>{statusLabel(state)}</Badge>
+      </div>
+      <p className="break-words text-xs leading-5 text-muted-foreground">{detail}</p>
     </div>
   )
+}
+
+function healthBadgeVariant(status: string) {
+  if (status === "ok") return "success"
+  if (status === "warning") return "warning"
+  if (status === "error") return "destructive"
+  return "secondary"
+}
+
+function statusLabel(status: string) {
+  if (status === "ok") return "ok"
+  if (status === "warning") return "warning"
+  if (status === "error") return "error"
+  return "加载中"
 }

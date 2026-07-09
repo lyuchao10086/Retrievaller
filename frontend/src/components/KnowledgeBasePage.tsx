@@ -16,16 +16,11 @@ import {
   listKnowledgeBases,
   updateKnowledgeBase
 } from "@/api/knowledgeBaseApi"
-import {
-  createChunks,
-  embedDocument,
-  getEmbeddingStatus,
-  listChunks,
-  listDocuments
-} from "@/api/documentApi"
+import { listDocuments } from "@/api/documentApi"
 import type { ChunkRecord } from "@/types/chunk"
 import type { DocumentRecord, EmbeddingStatus } from "@/types/document"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
+import { getDocumentStatusLabel } from "./knowledgeBaseDetailUtils"
 
 export default function KnowledgeBasePage() {
   const flow = ["原始文本", "文本清洗", "文档切分", "Embedding", "向量存储", "Retriever"]
@@ -162,69 +157,11 @@ export default function KnowledgeBasePage() {
     }
   }
 
-  const submitCreateChunks = async () => {
-    if (!selectedKbId || !selectedDocumentId) return
-    setLoading(true)
-    setError("")
-    try {
-      const data = await createChunks(selectedKbId, selectedDocumentId)
-      setChunks(data)
-      setMessage("chunks 已生成")
-      await refreshDocuments(selectedKbId)
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const refreshChunks = async () => {
-    if (!selectedKbId || !selectedDocumentId) return
-    setLoading(true)
-    setError("")
-    try {
-      setChunks(await listChunks(selectedKbId, selectedDocumentId))
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const submitEmbed = async () => {
-    if (!selectedKbId || !selectedDocumentId) return
-    setLoading(true)
-    setError("")
-    try {
-      setEmbeddingStatus(await embedDocument(selectedKbId, selectedDocumentId))
-      setMessage("embedding 已完成")
-      await refreshDocuments(selectedKbId)
-      await refreshChunks()
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const refreshEmbeddingStatus = async () => {
-    if (!selectedKbId || !selectedDocumentId) return
-    setLoading(true)
-    setError("")
-    try {
-      setEmbeddingStatus(await getEmbeddingStatus(selectedKbId, selectedDocumentId))
-    } catch (unknownError) {
-      showError(unknownError)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   return (
     <section>
       <PageHeader
         title="知识库构建"
-        description="配置 Chunk 策略、Embedding 模型、向量数据库与检索方式，模拟 LangChain Retriever 的完整构建过程。"
+        description="查看知识库与文档状态；Chunk、Embedding 与向量入库操作仍是待接入入口。"
       />
 
       {(message || error) && (
@@ -270,7 +207,7 @@ export default function KnowledgeBasePage() {
                 <option value="">请选择文档</option>
                 {documents.map((document) => (
                   <option key={document.id} value={document.id}>
-                    {document.file_name} ({document.status})
+                    {document.file_name} ({getDocumentStatusLabel(document.status)})
                   </option>
                 ))}
               </Select>
@@ -303,7 +240,7 @@ export default function KnowledgeBasePage() {
         <Card>
           <CardHeader>
             <CardTitle>构建流程图</CardTitle>
-            <CardDescription>从解析结果到 Milvus 向量库的转换链路</CardDescription>
+            <CardDescription>流程示意，仅用于展示后续接入方向</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-3 md:grid-cols-3">
@@ -326,24 +263,27 @@ export default function KnowledgeBasePage() {
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle>切片预览表格</CardTitle>
-            <CardDescription>Chunk、章节来源、Embedding 与入库状态</CardDescription>
+            <CardDescription>Chunk、Embedding 与向量状态操作待接入正式处理流程</CardDescription>
           </div>
           <div className="flex flex-wrap justify-end gap-2">
-            <Button variant="outline" onClick={() => void submitCreateChunks()} disabled={loading || selectedDocument?.status !== "parsed"}>
-              文档切分
+            <Button variant="outline" disabled>
+              文档切分（待接入）
             </Button>
-            <Button variant="outline" onClick={() => void refreshChunks()} disabled={loading || !selectedDocumentId}>
-              查看 Chunk
+            <Button variant="outline" disabled>
+              查看 Chunk（待接入）
             </Button>
-            <Button onClick={() => void submitEmbed()} disabled={loading || selectedDocument?.status !== "chunked"}>
-              Embedding
+            <Button disabled>
+              Embedding（待接入）
             </Button>
-            <Button variant="outline" onClick={() => void refreshEmbeddingStatus()} disabled={loading || !selectedDocumentId}>
-              向量状态
+            <Button variant="outline" disabled>
+              向量状态（待接入）
             </Button>
           </div>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
+            当前页面不触发后端切分、Embedding 或 Milvus 入库请求，避免误认为构建链路已完成接入。
+          </div>
           {embeddingStatus && (
             <div className="mb-4 grid gap-3 rounded-lg border bg-blue-50/50 p-4 text-sm md:grid-cols-4">
               <span>document_status: <b>{embeddingStatus.status}</b></span>
@@ -367,7 +307,7 @@ export default function KnowledgeBasePage() {
               {chunks.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
-                    {selectedDocumentId ? "暂无 Chunk，请先对 parsed 文档执行文档切分" : "请选择一个文档"}
+                    {selectedDocumentId ? "构建处理入口待接入，当前不展示真实 Chunk 预览" : "请选择一个文档"}
                   </TableCell>
                 </TableRow>
               ) : (
