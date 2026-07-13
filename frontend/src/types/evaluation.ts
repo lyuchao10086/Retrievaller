@@ -9,6 +9,8 @@ export type Evaluation = {
   overall_score: number
   reason: string
   created_at: string
+  updated_at: string
+  status: "completed"
 }
 
 export type EvaluationListResponse = {

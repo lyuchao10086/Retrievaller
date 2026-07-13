@@ -5,7 +5,8 @@ import type {
   DocumentRecord,
   EmbeddingStatus,
   ParsedDocument,
-  ParseTaskResponse
+  ParseTaskResponse,
+  ProcessingStatus
 } from "@/types/document"
 
 export function uploadDocument(kbId: string, file: File, chunkSettings?: ChunkSettingsPayload) {
@@ -78,6 +79,12 @@ export function embedDocument(kbId: string, documentId: string) {
 export function getEmbeddingStatus(kbId: string, documentId: string) {
   return request<EmbeddingStatus>(
     `/api/knowledge-bases/${kbId}/documents/${documentId}/embedding-status`
+  )
+}
+
+export function getProcessingStatus(kbId: string, documentId: string) {
+  return request<ProcessingStatus>(
+    `/api/knowledge-bases/${kbId}/documents/${documentId}/processing-status`
   )
 }
 

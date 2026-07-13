@@ -427,7 +427,7 @@ class MySQLDocumentRepository:
                 FROM documents
                 WHERE user_id = %s
                   AND knowledge_base_id = %s
-                  AND status != 'deleted'
+                  AND status = 'embedded'
                   AND id IN ({placeholders})
                 """,
                 (user_id, knowledge_base_id, *document_ids),
@@ -469,7 +469,7 @@ class MySQLDocumentRepository:
                 FROM documents
                 WHERE user_id = %s
                   AND knowledge_base_id IN ({kb_placeholders})
-                  AND status != 'deleted'
+                  AND status = 'embedded'
                   AND id IN ({doc_placeholders})
                 """,
                 (user_id, *knowledge_base_ids, *document_ids),

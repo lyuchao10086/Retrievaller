@@ -41,10 +41,12 @@ const documentStatusLabels: Record<string, string> = {
   uploaded: "已上传，待处理",
   parsing: "解析中",
   parsed: "已解析，待分段",
-  chunked: "已分段，待入库",
-  embedding: "向量入库中",
+  chunking: "分段创建中",
+  chunked: "已分段，待向量化",
+  embedding: "向量生成中",
   embedded: "已入库，可检索",
   failed: "处理失败",
+  deleting: "删除清理中，可重试",
   deleted: "已删除"
 }
 
@@ -56,7 +58,7 @@ export function getDocumentStatusLabel(status: string) {
 
 export function getDocumentStatusTone(status: string): DocumentStatusTone {
   if (status === "embedded") return "success"
-  if (status === "parsing" || status === "embedding") return "processing"
+  if (status === "parsing" || status === "chunking" || status === "embedding" || status === "deleting") return "processing"
   if (status === "failed") return "destructive"
   if (status === "deleted") return "secondary"
   return "warning"
@@ -68,7 +70,7 @@ export function isDocumentRetrievable(status: string) {
 
 export function getDocumentAvailabilityLabel(status: string) {
   if (status === "embedded") return "可检索"
-  if (status === "failed" || status === "deleted") return "不可用"
-  if (status === "parsing" || status === "embedding") return "处理中"
+  if (status === "failed" || status === "deleting" || status === "deleted") return "不可用"
+  if (status === "parsing" || status === "chunking" || status === "embedding") return "处理中"
   return "待处理"
 }

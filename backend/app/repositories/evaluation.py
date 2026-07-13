@@ -5,6 +5,10 @@ import aiomysql
 from app.models.evaluation import Evaluation
 
 
+class EvaluationAlreadyExistsError(RuntimeError):
+    """同一用户对同一问答记录的评估已由其他请求保存。"""
+
+
 class EvaluationRepository(Protocol):
     """评估 service 层依赖的数据存储接口约定。"""
 
@@ -34,42 +38,46 @@ class MySQLEvaluationRepository:
 
     async def insert(self, evaluation: Evaluation) -> Evaluation:
         """保存一条 DeepSeek 评估结果。"""
-        async with self.connection.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO evaluations (
-                    id,
-                    user_id,
-                    qa_record_id,
-                    faithfulness_score,
-                    relevance_score,
-                    citation_score,
-                    completeness_score,
-                    hallucination,
-                    overall_score,
-                    reason,
-                    raw_response,
-                    created_at,
-                    updated_at
+        try:
+            async with self.connection.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    INSERT INTO evaluations (
+                        id,
+                        user_id,
+                        qa_record_id,
+                        faithfulness_score,
+                        relevance_score,
+                        citation_score,
+                        completeness_score,
+                        hallucination,
+                        overall_score,
+                        reason,
+                        raw_response,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        evaluation.id,
+                        evaluation.user_id,
+                        evaluation.qa_record_id,
+                        evaluation.faithfulness_score,
+                        evaluation.relevance_score,
+                        evaluation.citation_score,
+                        evaluation.completeness_score,
+                        evaluation.hallucination,
+                        evaluation.overall_score,
+                        evaluation.reason,
+                        evaluation.raw_response,
+                        evaluation.created_at,
+                        evaluation.updated_at,
+                    ),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    evaluation.id,
-                    evaluation.user_id,
-                    evaluation.qa_record_id,
-                    evaluation.faithfulness_score,
-                    evaluation.relevance_score,
-                    evaluation.citation_score,
-                    evaluation.completeness_score,
-                    evaluation.hallucination,
-                    evaluation.overall_score,
-                    evaluation.reason,
-                    evaluation.raw_response,
-                    evaluation.created_at,
-                    evaluation.updated_at,
-                ),
-            )
+        except aiomysql.IntegrityError as exc:
+            await self.connection.rollback()
+            raise EvaluationAlreadyExistsError() from exc
         await self.connection.commit()
         return evaluation
 

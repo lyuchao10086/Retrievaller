@@ -20,11 +20,14 @@ DEFAULT_PARSED_RESULTS_BUCKET = "rag-parsed-results"
 UPLOADED_STATUS = "uploaded"
 PARSING_STATUS = "parsing"
 PARSED_STATUS = "parsed"
+CHUNKING_STATUS = "chunking"
 CHUNKED_STATUS = "chunked"
 EMBEDDING_STATUS = "embedding"
 EMBEDDED_STATUS = "embedded"
 FAILED_STATUS = "failed"
-CREATED_CHUNK_STATUS = "created"
+DELETING_STATUS = "deleting"
+DELETED_STATUS = "deleted"
+CREATED_CHUNK_STATUS = CHUNKED_STATUS
 DEFAULT_FILE_TYPE = "application/octet-stream"
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
@@ -42,6 +45,10 @@ class KnowledgeBaseNotFoundError(LookupError):
 
 class DocumentNotFoundError(LookupError):
     """当前知识库沙箱下找不到可见文档。"""
+
+
+class DocumentDeletionInProgressError(RuntimeError):
+    """删除中的文档不能再进入解析、切分或向量化阶段。"""
 
 
 class UnsupportedDocumentTypeError(ValueError):
@@ -79,14 +86,6 @@ async def upload_document_to_knowledge_base(
     )
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    await storage.ensure_bucket(bucket_name)
-    await storage.put_object(
-        bucket_name,
-        object_key,
-        content,
-        normalized_file_type,
-    )
-
     document = Document(
         id=document_id,
         user_id=user_id,
@@ -105,7 +104,21 @@ async def upload_document_to_knowledge_base(
         created_at=now,
         updated_at=now,
     )
-    return await document_repository.insert(document)
+    await storage.ensure_bucket(bucket_name)
+    await storage.put_object(
+        bucket_name,
+        object_key,
+        content,
+        normalized_file_type,
+    )
+    try:
+        return await document_repository.insert(document)
+    except Exception:
+        try:
+            await storage.delete_object(bucket_name, object_key)
+        except Exception:
+            pass
+        raise
 
 
 async def list_documents_by_knowledge_base(
@@ -134,28 +147,6 @@ async def get_document_by_id(
     )
 
 
-async def delete_document(
-    document_repository: DocumentRepository,
-    kb_id: str,
-    document_id: str,
-    user_id: str = DEFAULT_USER_ID,
-) -> Document | None:
-    """硬删除当前逻辑用户在指定知识库下的文档记录。"""
-    existing = await document_repository.get_by_id_and_knowledge_base(
-        user_id,
-        kb_id,
-        document_id,
-    )
-    if existing is None:
-        return None
-
-    return await document_repository.delete_by_id_and_knowledge_base(
-        user_id,
-        kb_id,
-        document_id,
-    )
-
-
 async def delete_document_storage_objects(
     storage: DocumentStorage,
     document: Document,
@@ -170,6 +161,54 @@ async def delete_document_storage_objects(
             document.parsed_bucket,
             document.parsed_object_key,
         )
+
+
+async def delete_document_with_cleanup(
+    document_repository: DocumentRepository,
+    chunk_repository: ChunkRepository,
+    storage: DocumentStorage,
+    vector_service: VectorService,
+    kb_id: str,
+    document_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> Document:
+    """清理向量、对象和 chunks，并以 deleted 状态保留文档生命周期记录。"""
+    document = await _require_document(document_repository, kb_id, document_id, user_id)
+    await _update_document_status(
+        document_repository,
+        kb_id,
+        document_id,
+        DELETING_STATUS,
+        None,
+        user_id,
+    )
+    try:
+        vector_service.delete_chunk_embeddings_by_document(user_id, kb_id, document_id)
+        await delete_document_storage_objects(storage, document)
+        await chunk_repository.delete_by_document(user_id, kb_id, document_id)
+    except Exception as exc:
+        await _update_document_status(
+            document_repository,
+            kb_id,
+            document_id,
+            DELETING_STATUS,
+            str(exc),
+            user_id,
+        )
+        raise
+
+    await _update_document_status(
+        document_repository,
+        kb_id,
+        document_id,
+        DELETED_STATUS,
+        None,
+        user_id,
+    )
+    document.status = DELETED_STATUS
+    document.error_message = None
+    document.task_id = None
+    return document
 
 
 async def rename_document(
@@ -256,6 +295,7 @@ async def parse_document_to_storage(
     当前实现是同步接口版本；后续迁移到 Celery 时可把本函数作为 task 主体复用。
     """
     document = await _require_document(document_repository, kb_id, document_id, user_id)
+    _ensure_document_not_deleting(document)
     await _update_document_status(
         document_repository,
         kb_id,
@@ -337,6 +377,7 @@ async def create_document_chunks(
     storage: DocumentStorage,
     kb_id: str,
     document_id: str,
+    vector_service: VectorService | None = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
     separator: str | None = None,
@@ -344,42 +385,70 @@ async def create_document_chunks(
     remove_urls_and_emails: bool = False,
     user_id: str = DEFAULT_USER_ID,
 ) -> list[Chunk]:
-    """从解析结果生成 chunks 并写入 chunks 表。"""
+    """从解析结果或原始文本生成 chunks 并写入 chunks 表。"""
     document = await _require_document(document_repository, kb_id, document_id, user_id)
-    if document.status not in {PARSED_STATUS, CHUNKED_STATUS, EMBEDDED_STATUS}:
-        raise ValueError("Document must be parsed before chunking")
+    _ensure_document_not_deleting(document)
+    if not is_supported_text_document(document.file_name, document.file_type):
+        raise UnsupportedDocumentTypeError(
+            "Only txt, md and markdown documents are supported"
+        )
 
-    parsed = await get_parsed_document_payload(
-        document_repository,
-        storage,
-        kb_id,
-        document_id,
-        user_id,
-    )
-    chunks = _build_chunks_from_parsed_payload(
-        parsed,
-        document,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separator=separator,
-        replace_consecutive_whitespace=replace_consecutive_whitespace,
-        remove_urls_and_emails=remove_urls_and_emails,
-    )
-    saved_chunks = await chunk_repository.replace_by_document(
-        user_id,
-        kb_id,
-        document_id,
-        chunks,
-    )
-    await _update_document_status(
-        document_repository,
-        kb_id,
-        document_id,
-        CHUNKED_STATUS,
-        None,
-        user_id,
-    )
-    return saved_chunks
+    try:
+        await _update_document_status(
+            document_repository,
+            kb_id,
+            document_id,
+            CHUNKING_STATUS,
+            None,
+            user_id,
+        )
+        parsed = await _load_parsed_or_parse_raw_document(
+            document_repository,
+            storage,
+            document,
+            kb_id,
+            document_id,
+            user_id,
+        )
+        chunks = _build_chunks_from_parsed_payload(
+            parsed,
+            document,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separator=separator,
+            replace_consecutive_whitespace=replace_consecutive_whitespace,
+            remove_urls_and_emails=remove_urls_and_emails,
+        )
+        existing_chunks = await chunk_repository.list_by_document(user_id, kb_id, document_id)
+        if vector_service is not None and any(chunk.vector_id for chunk in existing_chunks):
+            vector_service.delete_chunk_embeddings_by_document(user_id, kb_id, document_id)
+        saved_chunks = await chunk_repository.replace_by_document(
+            user_id,
+            kb_id,
+            document_id,
+            chunks,
+        )
+        await _update_document_status(
+            document_repository,
+            kb_id,
+            document_id,
+            CHUNKED_STATUS,
+            None,
+            user_id,
+        )
+        return saved_chunks
+    except (UnsupportedDocumentTypeError, ValueError):
+        raise
+    except Exception as exc:
+        await _update_document_status(
+            document_repository,
+            kb_id,
+            document_id,
+            FAILED_STATUS,
+            str(exc),
+            user_id,
+        )
+        raise
 
 
 async def list_document_chunks(
@@ -406,6 +475,7 @@ async def embed_document_chunks(
 ) -> dict[str, int | str]:
     """为文档 chunks 生成 embedding，写入 Milvus，并回写 chunks 状态。"""
     document = await _require_document(document_repository, kb_id, document_id, user_id)
+    _ensure_document_not_deleting(document)
     if document.status not in {CHUNKED_STATUS, EMBEDDING_STATUS, EMBEDDED_STATUS}:
         raise ValueError("Document must be chunked before embedding")
 
@@ -477,6 +547,64 @@ async def get_document_embedding_status(
         "document_id": document_id,
         "status": document.status,
         **counts,
+    }
+
+
+async def get_document_processing_status(
+    document_repository: DocumentRepository,
+    chunk_repository: ChunkRepository,
+    kb_id: str,
+    document_id: str,
+    user_id: str = DEFAULT_USER_ID,
+) -> dict[str, int | str | None]:
+    """返回后台处理状态，包含 Celery task_id、错误信息和 chunk 统计。"""
+    document = await _require_document(document_repository, kb_id, document_id, user_id)
+    counts = await chunk_repository.count_embedding_status(user_id, kb_id, document_id)
+    return {
+        "document_id": document_id,
+        "status": document.status,
+        "task_id": document.task_id,
+        "error_message": document.error_message,
+        **counts,
+    }
+
+
+async def _load_parsed_or_parse_raw_document(
+    document_repository: DocumentRepository,
+    storage: DocumentStorage,
+    document: Document,
+    kb_id: str,
+    document_id: str,
+    user_id: str,
+) -> dict[str, object]:
+    """Prefer saved parse JSON, but allow uploaded txt/md to be chunked directly."""
+    if document.parsed_bucket and document.parsed_object_key:
+        try:
+            return await get_parsed_document_payload(
+                document_repository,
+                storage,
+                kb_id,
+                document_id,
+                user_id,
+            )
+        except FileNotFoundError:
+            pass
+
+    raw_content = await storage.get_object(
+        document.storage_bucket,
+        document.storage_object_key,
+    )
+    parsed = parse_document_content(
+        raw_content,
+        document.file_name,
+        document.file_type,
+    )
+    return {
+        "document_id": document.id,
+        "knowledge_base_id": document.knowledge_base_id,
+        "file_name": document.file_name,
+        "file_type": document.file_type,
+        **parsed,
     }
 
 
@@ -684,6 +812,11 @@ async def _require_document(
     if document is None:
         raise DocumentNotFoundError("Document not found")
     return document
+
+
+def _ensure_document_not_deleting(document: Document) -> None:
+    if document.status == DELETING_STATUS:
+        raise DocumentDeletionInProgressError("Document is deleting")
 
 
 async def _update_document_status(

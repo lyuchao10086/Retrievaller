@@ -511,7 +511,7 @@ function SourcesDisclosure({ sources }: { sources: MultiRagSource[] }) {
   if (sources.length === 0) {
     return (
       <div className="mt-4 text-xs text-muted-foreground">
-        未返回引用来源。
+        本次回答未返回引用来源
       </div>
     )
   }
@@ -533,9 +533,13 @@ function SourcesDisclosure({ sources }: { sources: MultiRagSource[] }) {
                 <span className="font-medium">来源 {sourceIndex + 1}</span>
                 <span className="text-muted-foreground">score {source.score.toFixed(4)}</span>
               </div>
-              <p className="leading-6">来源：{formatSource(source.source)}</p>
-              <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">知识库 ID：{source.knowledge_base_id}</p>
-              <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">Chunk ID：{source.chunk_id}</p>
+              <div className="space-y-0.5 leading-6">
+                <p>知识库：{source.source.knowledge_base_name || source.knowledge_base_id}</p>
+                <p>文档：{formatDocumentSource(source.source)}</p>
+                <p className="font-mono text-[11px] text-muted-foreground">知识库 ID：{source.knowledge_base_id}</p>
+                <p className="font-mono text-[11px] text-muted-foreground">Document ID：{source.document_id}</p>
+                <p className="font-mono text-[11px] text-muted-foreground">Chunk ID：{source.chunk_id}</p>
+              </div>
               <div className="mt-2 max-h-28 overflow-auto rounded-md bg-[#fafafa] p-2 leading-6 text-muted-foreground">
                 {source.content}
               </div>
@@ -742,11 +746,10 @@ function ToolIconButton({
   )
 }
 
-function formatSource(source: MultiRagSource["source"]) {
-  const fileSource = [source.file_name, source.chapter, source.section, source.subsection]
+function formatDocumentSource(source: MultiRagSource["source"]) {
+  return [source.file_name, source.chapter, source.section, source.subsection]
     .filter(Boolean)
     .join(" - ")
-  return [source.knowledge_base_name, fileSource].filter(Boolean).join(" / ")
 }
 
 function readDefaultTopK() {

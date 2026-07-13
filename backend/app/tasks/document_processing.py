@@ -7,12 +7,14 @@ from app.core.database import get_database_pool, init_database
 from app.repositories.chunk import MySQLChunkRepository
 from app.repositories.document import MySQLDocumentRepository
 from app.services.document import (
+    DocumentDeletionInProgressError,
     create_document_chunks,
     embed_document_chunks,
     parse_document_to_storage,
 )
 from app.services.document_storage import MinIODocumentStorage
 from app.services.embedding_service import OllamaEmbeddingService
+from app.services.knowledge_base import DEFAULT_USER_ID
 from app.services.vector_service import MilvusVectorService
 from app.tasks.celery_app import celery_app
 
@@ -24,13 +26,27 @@ from app.tasks.celery_app import celery_app
 )
 def process_document_task(
     self,
+    user_id: str,
     kb_id: str,
-    document_id: str,
+    document_id: str | dict[str, object] | None = None,
     chunk_settings: dict[str, object] | None = None,
 ) -> dict[str, str]:
     """后台处理 txt/md 文档；失败后保留 failed 状态并允许手动重试。"""
+    user_id, kb_id, document_id, chunk_settings = _normalize_task_args(
+        user_id,
+        kb_id,
+        document_id,
+        chunk_settings,
+    )
     try:
-        return asyncio.run(_process_document(kb_id, document_id, chunk_settings))
+        return asyncio.run(_process_document(user_id, kb_id, document_id, chunk_settings))
+    except DocumentDeletionInProgressError:
+        return {
+            "user_id": user_id or DEFAULT_USER_ID,
+            "kb_id": kb_id,
+            "document_id": document_id,
+            "status": "deleting",
+        }
     except Exception as exc:
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=5) from exc
@@ -38,6 +54,7 @@ def process_document_task(
 
 
 async def _process_document(
+    user_id: str,
     kb_id: str,
     document_id: str,
     chunk_settings: dict[str, object] | None,
@@ -72,14 +89,17 @@ async def _process_document(
             storage=storage,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=user_id or DEFAULT_USER_ID,
             parsed_bucket_name=settings.minio_bucket_parsed_results,
         )
         await create_document_chunks(
             document_repository=document_repository,
             chunk_repository=chunk_repository,
             storage=storage,
+            vector_service=vector_service,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=user_id or DEFAULT_USER_ID,
             **_chunk_settings_kwargs(chunk_settings),
         )
         await embed_document_chunks(
@@ -90,9 +110,15 @@ async def _process_document(
             kb_id=kb_id,
             document_id=document_id,
             expected_embedding_dimension=settings.embedding_dimension,
+            user_id=user_id or DEFAULT_USER_ID,
         )
 
-    return {"kb_id": kb_id, "document_id": document_id, "status": "embedded"}
+    return {
+        "user_id": user_id or DEFAULT_USER_ID,
+        "kb_id": kb_id,
+        "document_id": document_id,
+        "status": "embedded",
+    }
 
 
 def _chunk_settings_kwargs(
@@ -112,3 +138,17 @@ def _chunk_settings_kwargs(
         for key, value in chunk_settings.items()
         if key in allowed_keys
     }
+
+
+def _normalize_task_args(
+    user_id: str,
+    kb_id: str,
+    document_id: str | dict[str, object] | None,
+    chunk_settings: dict[str, object] | None,
+) -> tuple[str, str, str, dict[str, object] | None]:
+    """兼容旧队列中的 (kb_id, document_id, settings) 任务参数。"""
+    if isinstance(document_id, str):
+        return user_id or DEFAULT_USER_ID, kb_id, document_id, chunk_settings
+
+    legacy_chunk_settings = document_id if isinstance(document_id, dict) else chunk_settings
+    return DEFAULT_USER_ID, user_id, kb_id, legacy_chunk_settings

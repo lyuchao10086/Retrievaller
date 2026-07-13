@@ -3,6 +3,8 @@ import { createPortal } from "react-dom"
 import {
   ArrowLeft,
   ChevronDown,
+  CheckCircle2,
+  Loader2,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -13,7 +15,7 @@ import {
   X
 } from "lucide-react"
 import { ApiError } from "@/api/client"
-import { deleteDocument, listDocuments, renameDocument, uploadDocument } from "@/api/documentApi"
+import { deleteDocument, listDocuments, processDocument, renameDocument, uploadDocument } from "@/api/documentApi"
 import { listQaRecords } from "@/api/ragApi"
 import type { DocumentRecord } from "@/types/document"
 import type { KnowledgeBase } from "@/types/knowledgeBase"
@@ -49,6 +51,8 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
   const [renameTarget, setRenameTarget] = useState<DocumentRecord | null>(null)
   const [renameValue, setRenameValue] = useState("")
   const [renameLoading, setRenameLoading] = useState(false)
+  const [workingDocumentId, setWorkingDocumentId] = useState<string | null>(null)
+  const [workingAction, setWorkingAction] = useState<"process" | null>(null)
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number; flipUp: boolean } | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -66,9 +70,11 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
     return () => clearTimeout(timer)
   }, [message])
 
-  const refresh = useCallback(async () => {
-    setLoading(true)
-    setError("")
+  const refresh = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setLoading(true)
+      setError("")
+    }
     try {
       const [documentData, qaRecordsResult] = await Promise.allSettled([
         listDocuments(knowledgeBase.id),
@@ -87,15 +93,23 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
         setRecallCounts({})
       }
     } catch (unknownError) {
-      showError(unknownError)
+      if (!options?.silent) showError(unknownError)
     } finally {
-      setLoading(false)
+      if (!options?.silent) setLoading(false)
     }
   }, [knowledgeBase.id])
 
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  useEffect(() => {
+    if (!documents.some((document) => isProcessingDocument(document.status))) return
+    const timer = window.setInterval(() => {
+      void refresh({ silent: true })
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [documents, refresh])
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -140,7 +154,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
         await uploadDocument(knowledgeBase.id, file)
       }
       await refresh()
-      setMessage("文件已上传，尚未完成分段与向量入库")
+      setMessage("文件已上传，可点击开始处理；处理完成后即可用于问答检索")
     } catch (unknownError) {
       showError(unknownError)
     } finally {
@@ -161,6 +175,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
       await refresh()
     } catch (unknownError) {
       showError(unknownError)
+      await refresh({ silent: true })
     } finally {
       setDeleteLoading(false)
     }
@@ -182,6 +197,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
       await refresh()
     } catch (unknownError) {
       showError(unknownError)
+      await refresh({ silent: true })
     } finally {
       setDeleteLoading(false)
     }
@@ -200,6 +216,23 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
       showError(unknownError)
     } finally {
       setRenameLoading(false)
+    }
+  }
+
+  const submitDocumentProcessing = async (document: DocumentRecord) => {
+    setWorkingDocumentId(document.id)
+    setWorkingAction("process")
+    setError("")
+    setMessage("")
+    try {
+      await processDocument(knowledgeBase.id, document.id)
+      setMessage("已提交后台处理，请稍候")
+      await refresh()
+    } catch (unknownError) {
+      showError(unknownError)
+    } finally {
+      setWorkingDocumentId(null)
+      setWorkingAction(null)
     }
   }
 
@@ -317,7 +350,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
       )}
 
       <div className="mt-8 overflow-x-auto">
-        <table className="min-w-[980px] w-full border-collapse text-sm">
+        <table className="min-w-[1120px] w-full border-collapse text-sm">
           <thead>
             <tr className="border-b border-[#edf0f4] text-left text-xs font-medium text-[#637083]">
               <th className="w-8 px-3 py-3">
@@ -346,8 +379,8 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
                   <ChevronDown className="h-3 w-3" />
                 </span>
               </th>
-              <th className="w-28 px-3 py-3 font-medium">状态</th>
-              <th className="w-24 px-3 py-3 font-medium">操作</th>
+              <th className="w-36 px-3 py-3 font-medium">状态</th>
+              <th className="w-56 px-3 py-3 font-medium">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -368,6 +401,8 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
                 const availability = getDocumentAvailabilityLabel(document.status)
                 const retrievable = isDocumentRetrievable(document.status)
                 const isSelected = selectedIds.has(document.id)
+                const isWorking = workingDocumentId === document.id
+                const actionDisabled = workingDocumentId !== null
                 return (
                   <tr
                     key={document.id}
@@ -387,11 +422,18 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
                     </td>
                     <td className="px-0 py-3 text-xs text-[#64748b]">{index + 1}</td>
                     <td className="px-3 py-3">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <FileTypeBadge fileName={document.file_name} fileType={document.file_type} />
-                        <span className="truncate font-medium text-[#172033]" title={document.file_name}>
-                          {document.file_name}
-                        </span>
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <FileTypeBadge fileName={document.file_name} fileType={document.file_type} />
+                          <span className="truncate font-medium text-[#172033]" title={document.file_name}>
+                            {document.file_name}
+                          </span>
+                        </div>
+                        {document.status === "failed" && document.error_message && (
+                          <div className="mt-1 max-w-[360px] truncate text-xs text-red-500" title={document.error_message}>
+                            {document.error_message}
+                          </div>
+                        )}
                       </div>
                     </td>
                     <td className="px-3 py-3 text-[#334155]">{formatCompactCount(document.file_size)}</td>
@@ -408,6 +450,13 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
                     </td>
                     <td className="px-3 py-3">
                       <div className="flex items-center gap-3">
+                        <DocumentActionButton
+                          document={document}
+                          isWorking={isWorking}
+                          disabled={actionDisabled}
+                          workingAction={isWorking ? workingAction : null}
+                          onProcess={() => void submitDocumentProcessing(document)}
+                        />
                         <span
                           role="switch"
                           aria-checked={retrievable}
@@ -607,6 +656,82 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
       )}
     </section>
   )
+}
+
+function DocumentActionButton({
+  document,
+  isWorking,
+  disabled,
+  workingAction,
+  onProcess
+}: {
+  document: DocumentRecord
+  isWorking: boolean
+  disabled: boolean
+  workingAction: "process" | null
+  onProcess: () => void
+}) {
+  if (
+    document.status === "uploaded" ||
+    document.status === "failed" ||
+    document.status === "parsed" ||
+    document.status === "chunked"
+  ) {
+    const label = document.status === "failed"
+      ? "重试处理"
+      : document.status === "uploaded"
+        ? "开始处理"
+        : "继续处理"
+    return (
+      <button
+        type="button"
+        onClick={onProcess}
+        disabled={disabled}
+        className={cn(
+          "inline-flex h-7 min-w-[84px] items-center justify-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60",
+          document.status === "failed"
+            ? "border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+            : "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+        )}
+      >
+        {isWorking && workingAction === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />}
+        {isWorking && workingAction === "process" ? "提交中" : label}
+      </button>
+    )
+  }
+
+  if (isProcessingDocument(document.status)) {
+    const label = document.status === "parsing"
+      ? "解析中"
+      : document.status === "chunking"
+        ? "分段中"
+        : "向量中"
+    return (
+      <span className="inline-flex h-7 min-w-[84px] items-center justify-center gap-1.5 rounded-md bg-amber-50 px-2.5 text-xs font-medium text-amber-700">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        {label}
+      </span>
+    )
+  }
+
+  if (document.status === "embedded") {
+    return (
+      <span className="inline-flex h-7 min-w-[84px] items-center justify-center gap-1.5 rounded-md bg-emerald-50 px-2.5 text-xs font-medium text-emerald-700">
+        <CheckCircle2 className="h-3.5 w-3.5" />
+        可检索
+      </span>
+    )
+  }
+
+  return (
+    <span className="inline-flex h-7 min-w-[84px] items-center justify-center rounded-md bg-slate-50 px-2.5 text-xs text-slate-500">
+      待处理
+    </span>
+  )
+}
+
+function isProcessingDocument(status: string) {
+  return status === "parsing" || status === "chunking" || status === "embedding"
 }
 
 function FileTypeBadge({ fileName, fileType }: { fileName: string; fileType?: string | null }) {

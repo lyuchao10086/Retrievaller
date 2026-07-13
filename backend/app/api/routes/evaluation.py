@@ -104,7 +104,7 @@ async def create_evaluation_api(
         ) from exc
     except DeepSeekConfigurationError as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=DEEPSEEK_API_KEY_NOT_CONFIGURED_MESSAGE,
         ) from exc
     except DeepSeekAPIError as exc:
@@ -129,6 +129,10 @@ async def create_evaluation_api(
 @router.get("/qa-records/{qa_record_id}", response_model=EvaluationResponse)
 async def get_evaluation_api(
     qa_record_id: str,
+    qa_record_repository: Annotated[
+        QaRecordRepository,
+        Depends(get_qa_record_repository),
+    ],
     evaluation_repository: Annotated[
         EvaluationRepository,
         Depends(get_evaluation_repository),
@@ -137,9 +141,15 @@ async def get_evaluation_api(
     """查询指定问答记录的评估结果。"""
     try:
         evaluation = await get_evaluation_by_qa_record_id(
+            qa_record_repository,
             evaluation_repository,
             qa_record_id,
         )
+    except QaRecordNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Qa record not found",
+        ) from exc
     except EvaluationNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -16,6 +17,8 @@ class EvaluationResponse(BaseModel):
     overall_score: int
     reason: str
     created_at: datetime
+    updated_at: datetime
+    status: Literal["completed"] = "completed"
 
     model_config = ConfigDict(from_attributes=True)
 

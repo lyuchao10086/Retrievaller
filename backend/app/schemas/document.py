@@ -90,3 +90,10 @@ class EmbeddingStatusResponse(BaseModel):
     total_chunks: int
     embedded_chunks: int
     pending_chunks: int
+
+
+class ProcessingStatusResponse(EmbeddingStatusResponse):
+    """文档后台处理进度，补充 Celery 任务和错误信息。"""
+
+    task_id: str | None
+    error_message: str | None

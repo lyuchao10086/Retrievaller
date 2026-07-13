@@ -22,24 +22,29 @@ from app.services.vector_service import VectorService
 
 NO_RETRIEVAL_ANSWER = "当前知识库中没有检索到与问题相关的内容。"
 NO_MULTI_RETRIEVAL_ANSWER = "当前选择的知识库中没有检索到与问题相关的内容。"
+MAX_REFERENCE_CONTENT_CHARS = 1600
 
 SYSTEM_PROMPT = """你是一个严谨的知识库问答助手。
 你只能根据给定的参考资料回答问题。
-如果参考资料中没有足够信息，请回答“根据当前知识库资料无法确定”。
-不要编造参考资料中没有出现的事实。
-回答要简洁、准确、有条理。
-回答后必须给出引用来源。
-引用来源格式为：文档名 - 章节 - 小节。
-如果章节或小节为空，可以省略对应部分。"""
+如果参考资料中没有足够信息，必须回答“根据当前知识库资料无法确定”。
+不要编造参考资料中没有出现的事实、人物、数字、结论或文档名。
+不要把引用来源写成不存在的文档名，只能使用参考资料中给出的编号和来源。
+
+输出格式：
+1. 先直接回答问题，内容简洁、准确、有条理。
+2. 然后列出“依据”，用要点说明答案分别依据了哪些参考资料编号。
+3. 如果资料不足，只说明无法确定，并简要说明缺少哪类资料。"""
 
 MULTI_KB_SYSTEM_PROMPT = """你是一个严谨的知识库问答助手。
 你只能根据给定的参考资料回答问题。
-如果参考资料中没有足够信息，请回答“根据当前选择的知识库资料无法确定”。
-不要编造参考资料中没有出现的事实。
-回答要简洁、准确、有条理。
-回答后必须给出引用来源。
-引用来源格式为：知识库名 / 文档名 - 章节 - 小节。
-如果章节或小节为空，可以省略对应部分。"""
+如果参考资料中没有足够信息，必须回答“根据当前选择的知识库资料无法确定”。
+不要编造参考资料中没有出现的事实、人物、数字、结论或文档名。
+不要把引用来源写成不存在的知识库名或文档名，只能使用参考资料中给出的编号和来源。
+
+输出格式：
+1. 先直接回答问题，内容简洁、准确、有条理。
+2. 然后列出“依据”，用要点说明答案分别依据了哪些参考资料编号。
+3. 如果资料不足，只说明无法确定，并简要说明缺少哪类资料。"""
 
 
 class InvalidKnowledgeBasesError(ValueError):
@@ -228,8 +233,11 @@ def _build_user_prompt(query: str, sources: list[RagSource]) -> str:
             "\n".join(
                 [
                     f"[{index}]",
-                    f"来源：{_format_source(source.source)}",
-                    f"内容：{source.content}",
+                    f"文档：{_format_source(source.source)}",
+                    f"Document ID：{source.document_id}",
+                    f"Chunk ID：{source.chunk_id}",
+                    f"相似度分数：{source.score:.4f}",
+                    f"原文：{_truncate_reference_content(source.content)}",
                 ]
             )
         )
@@ -242,10 +250,11 @@ def _build_user_prompt(query: str, sources: list[RagSource]) -> str:
 
 请基于以上参考资料回答用户问题。
 要求：
-1. 只能根据参考资料回答。
-2. 不要编造。
-3. 如果资料不足，请明确说明无法确定。
-4. 回答后列出引用来源。"""
+1. 先直接回答问题，再列出“依据”。
+2. 只能根据参考资料回答，不要编造。
+3. 如果资料不足，请回答“根据当前知识库资料无法确定”。
+4. 引用依据时只使用参考资料编号，例如“依据：[1]、[2]”。
+5. 不要写出参考资料中不存在的文档名、章节名或知识库名。"""
 
 
 def _build_multi_kb_user_prompt(
@@ -260,8 +269,12 @@ def _build_multi_kb_user_prompt(
                 [
                     f"[{index}]",
                     f"知识库：{source.source.knowledge_base_name}",
-                    f"来源：{_format_multi_source(source.source)}",
-                    f"内容：{source.content}",
+                    f"知识库 ID：{source.knowledge_base_id}",
+                    f"文档：{_format_multi_source(source.source)}",
+                    f"Document ID：{source.document_id}",
+                    f"Chunk ID：{source.chunk_id}",
+                    f"相似度分数：{source.score:.4f}",
+                    f"原文：{_truncate_reference_content(source.content)}",
                 ]
             )
         )
@@ -274,11 +287,11 @@ def _build_multi_kb_user_prompt(
 
 请基于以上参考资料回答用户问题。
 要求：
-1. 只能根据参考资料回答。
-2. 不要编造。
+1. 先直接回答问题，再列出“依据”。
+2. 只能根据参考资料回答，不要编造。
 3. 如果资料不足，请回答“根据当前选择的知识库资料无法确定”。
-4. 回答要简洁、有条理。
-5. 回答后列出引用来源，引用格式：知识库名 / 文档名 - 章节 - 小节。"""
+4. 引用依据时只使用参考资料编号，例如“依据：[1]、[2]”。
+5. 不要写出参考资料中不存在的知识库名、文档名或章节名。"""
 
 
 def _format_source(source: RagSourceInfo) -> str:
@@ -299,3 +312,10 @@ def _format_multi_source(source: MultiKnowledgeBaseRagSourceInfo) -> str:
         source.subsection,
     ]
     return " - ".join(part for part in parts if part)
+
+
+def _truncate_reference_content(content: str) -> str:
+    normalized = " ".join(content.split())
+    if len(normalized) <= MAX_REFERENCE_CONTENT_CHARS:
+        return normalized
+    return f"{normalized[:MAX_REFERENCE_CONTENT_CHARS]}...（内容已截断）"

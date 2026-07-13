@@ -20,19 +20,23 @@ from app.models.knowledge_base import KnowledgeBase
 from app.repositories.chunk import MySQLChunkRepository
 from app.services.document import (
     DEFAULT_DOCUMENT_BUCKET,
+    DELETED_STATUS,
+    DELETING_STATUS,
+    DocumentDeletionInProgressError,
     UPLOADED_STATUS,
     create_document_chunks,
-    delete_document,
+    delete_document_with_cleanup,
     embed_document_chunks,
     get_document_by_id,
     get_document_embedding_status,
     list_documents_by_knowledge_base,
     parse_document_content,
+    parse_document_to_storage,
     upload_document_to_knowledge_base,
 )
 from app.services.embedding_service import OllamaEmbeddingService
 from app.services.knowledge_base import DEFAULT_USER_ID
-from app.tasks.document_processing import _chunk_settings_kwargs
+from app.tasks.document_processing import _chunk_settings_kwargs, _normalize_task_args
 
 
 class InMemoryKnowledgeBaseRepository:
@@ -209,6 +213,19 @@ class InMemoryChunkRepository:
             and item.document_id == document_id
         ]
 
+    async def delete_by_document(self, user_id, knowledge_base_id, document_id):
+        deleted = await self.list_by_document(user_id, knowledge_base_id, document_id)
+        self.items = [
+            item
+            for item in self.items
+            if not (
+                item.user_id == user_id
+                and item.knowledge_base_id == knowledge_base_id
+                and item.document_id == document_id
+            )
+        ]
+        return deleted
+
     async def update_embedding_results(self, user_id, knowledge_base_id, document_id, results, updated_at):
         result_by_chunk_id = dict(results)
         for item in self.items:
@@ -318,15 +335,21 @@ class FakeProcessingQueue:
     def __init__(self):
         self.calls = []
 
-    def delay(self, kb_id, document_id, chunk_settings=None):
+    def delay(self, user_id, kb_id, document_id, chunk_settings=None):
         self.calls.append(
             {
+                "user_id": user_id,
                 "kb_id": kb_id,
                 "document_id": document_id,
                 "chunk_settings": chunk_settings,
             }
         )
         return type("FakeTask", (), {"id": f"task_{document_id}"})()
+
+
+class FailingProcessingQueue:
+    def delay(self, user_id, kb_id, document_id, chunk_settings=None):
+        raise RuntimeError("Celery unavailable")
 
 
 class InMemoryDocumentStorage:
@@ -348,6 +371,22 @@ class InMemoryDocumentStorage:
 
     async def delete_object(self, bucket_name, object_key):
         self.objects.pop((bucket_name, object_key), None)
+
+
+class FailingInsertDocumentRepository(InMemoryDocumentRepository):
+    async def insert(self, document):
+        raise RuntimeError("MySQL unavailable")
+
+
+class FailingDeleteDocumentStorage(InMemoryDocumentStorage):
+    def __init__(self):
+        super().__init__()
+        self.fail_deletes = True
+
+    async def delete_object(self, bucket_name, object_key):
+        if self.fail_deletes:
+            raise RuntimeError("MinIO unavailable")
+        await super().delete_object(bucket_name, object_key)
 
 
 def test_upload_document_requires_active_knowledge_base():
@@ -414,6 +453,113 @@ def test_upload_document_saves_raw_file_and_document_record():
     assert document_repository.items == [document]
 
 
+def test_upload_document_removes_raw_object_when_document_insert_fails():
+    knowledge_base = make_knowledge_base("kb_active")
+    storage = InMemoryDocumentStorage()
+
+    try:
+        run_async(
+            upload_document_to_knowledge_base(
+                knowledge_base_repository=InMemoryKnowledgeBaseRepository([knowledge_base]),
+                document_repository=FailingInsertDocumentRepository(),
+                storage=storage,
+                kb_id=knowledge_base.id,
+                file_name="demo.txt",
+                file_type="text/plain",
+                content=b"hello",
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "MySQL unavailable"
+    else:
+        raise AssertionError("expected document insert failure")
+
+    assert storage.objects == {}
+
+
+def test_delete_document_cleanup_marks_deleted_after_vectors_objects_and_chunks_are_removed():
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    vector_service = FakeVectorService()
+    document = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
+    document.status = "embedded"
+    document.parsed_bucket = "rag-parsed-results"
+    document.parsed_object_key = "parsed/doc_target.json"
+    document_repository.items.append(document)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    chunk_repository.items.append(make_chunk("chunk_target", document, 0, "embedded", "vec_1", now))
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {"data": b"raw", "content_type": "text/plain"}
+    storage.objects[(document.parsed_bucket, document.parsed_object_key)] = {"data": b"{}", "content_type": "application/json"}
+
+    deleted = run_async(
+        delete_document_with_cleanup(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            storage=storage,
+            vector_service=vector_service,
+            kb_id=document.knowledge_base_id,
+            document_id=document.id,
+        )
+    )
+
+    assert deleted.status == DELETED_STATUS
+    assert document.status == DELETED_STATUS
+    assert chunk_repository.items == []
+    assert storage.objects == {}
+    assert vector_service.deleted_documents == [{
+        "user_id": DEFAULT_USER_ID,
+        "knowledge_base_id": document.knowledge_base_id,
+        "document_id": document.id,
+    }]
+
+
+def test_delete_document_cleanup_keeps_deleting_status_after_storage_failure_and_can_retry():
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = FailingDeleteDocumentStorage()
+    vector_service = FakeVectorService()
+    document = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
+    document.status = "embedded"
+    document_repository.items.append(document)
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {"data": b"raw", "content_type": "text/plain"}
+
+    try:
+        run_async(
+            delete_document_with_cleanup(
+                document_repository=document_repository,
+                chunk_repository=chunk_repository,
+                storage=storage,
+                vector_service=vector_service,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+            )
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "MinIO unavailable"
+    else:
+        raise AssertionError("expected storage delete failure")
+
+    assert document.status == DELETING_STATUS
+    assert document.error_message == "MinIO unavailable"
+    assert (document.storage_bucket, document.storage_object_key) in storage.objects
+
+    storage.fail_deletes = False
+    deleted = run_async(
+        delete_document_with_cleanup(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            storage=storage,
+            vector_service=vector_service,
+            kb_id=document.knowledge_base_id,
+            document_id=document.id,
+        )
+    )
+
+    assert deleted.status == DELETED_STATUS
+    assert storage.objects == {}
+
+
 def test_ollama_embedding_service_calls_batch_embed_api():
     requests = []
 
@@ -470,6 +616,31 @@ def test_parse_document_content_supports_txt_and_markdown_sections():
     ]
 
 
+def test_parse_document_does_not_restart_a_document_being_deleted():
+    document_repository = InMemoryDocumentRepository()
+    storage = InMemoryDocumentStorage()
+    document = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
+    document.status = DELETING_STATUS
+    document_repository.items.append(document)
+
+    try:
+        run_async(
+            parse_document_to_storage(
+                document_repository=document_repository,
+                storage=storage,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+            )
+        )
+    except DocumentDeletionInProgressError:
+        pass
+    else:
+        raise AssertionError("expected processing to stop for deleting document")
+
+    assert document.status == DELETING_STATUS
+    assert document.error_message is None
+
+
 def test_create_document_chunks_splits_parsed_text_and_updates_document_status():
     document_repository = InMemoryDocumentRepository()
     chunk_repository = InMemoryChunkRepository()
@@ -509,8 +680,84 @@ def test_create_document_chunks_splits_parsed_text_and_updates_document_status()
 
     assert [chunk.content for chunk in chunks] == ["一二三四五", "五六七八九", "九十", "第二段"]
     assert [chunk.chunk_index for chunk in chunks] == [0, 1, 2, 3]
-    assert all(chunk.status == "created" and chunk.vector_id is None for chunk in chunks)
+    assert all(chunk.status == "chunked" and chunk.vector_id is None for chunk in chunks)
     assert document.status == "chunked"
+
+
+def test_retry_failed_document_chunking_cleans_old_vectors_before_rebuilding_chunks():
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    vector_service = FakeVectorService()
+    document = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
+    document.status = "failed"
+    document.error_message = "previous embedding failure"
+    document_repository.items.append(document)
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {
+        "data": "第一段内容。\n\n第二段内容。".encode("utf-8"),
+        "content_type": "text/plain",
+    }
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    chunk_repository.items.append(
+        make_chunk("chunk_old", document, 0, "embedded", "vec_old", now)
+    )
+
+    chunks = run_async(
+        create_document_chunks(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            storage=storage,
+            vector_service=vector_service,
+            kb_id=document.knowledge_base_id,
+            document_id=document.id,
+            chunk_size=500,
+            chunk_overlap=50,
+        )
+    )
+
+    assert [chunk.content for chunk in chunks] == ["第一段内容。", "第二段内容。"]
+    assert all(chunk.status == "chunked" and chunk.vector_id is None for chunk in chunks)
+    assert document.status == "chunked"
+    assert chunk_repository.items == chunks
+    assert vector_service.deleted_documents == [
+        {
+            "user_id": DEFAULT_USER_ID,
+            "knowledge_base_id": document.knowledge_base_id,
+            "document_id": document.id,
+        }
+    ]
+
+
+def test_create_document_chunks_rejects_unsupported_raw_document_type():
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    document = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
+    document.file_name = "demo.pdf"
+    document.file_type = "application/pdf"
+    document_repository.items.append(document)
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {
+        "data": b"%PDF",
+        "content_type": "application/pdf",
+    }
+
+    try:
+        run_async(
+            create_document_chunks(
+                document_repository=document_repository,
+                chunk_repository=chunk_repository,
+                storage=storage,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+            )
+        )
+    except Exception as exc:
+        error = exc
+    else:
+        error = None
+
+    assert str(error) == "Only txt, md and markdown documents are supported"
+    assert chunk_repository.items == []
 
 
 def test_create_document_chunks_applies_separator_cleaning_and_size_settings():
@@ -739,49 +986,6 @@ def test_get_document_by_id_requires_default_user_and_knowledge_base():
     assert missing is None
 
 
-def test_delete_document_hard_deletes_default_user_knowledge_base_document():
-    document_repository = InMemoryDocumentRepository()
-    target = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
-    document_repository.items.append(target)
-
-    deleted = run_async(
-        delete_document(document_repository, "kb_target", "doc_target")
-    )
-    listed_documents = run_async(
-        list_documents_by_knowledge_base(document_repository, "kb_target")
-    )
-    found_after_delete = run_async(
-        get_document_by_id(document_repository, "kb_target", "doc_target")
-    )
-
-    assert deleted is not None
-    assert deleted.id == target.id
-    assert target not in document_repository.items
-    assert listed_documents == []
-    assert found_after_delete is None
-
-
-def test_delete_document_requires_default_user_and_knowledge_base():
-    document_repository = InMemoryDocumentRepository()
-    target = make_document("doc_target", "kb_target", DEFAULT_USER_ID)
-    other_kb = make_document("doc_target", "kb_other", DEFAULT_USER_ID)
-    other_user = make_document("doc_other_user", "kb_target", "other_user")
-    document_repository.items.extend([target, other_kb, other_user])
-
-    wrong_kb = run_async(
-        delete_document(document_repository, "kb_wrong", "doc_target")
-    )
-    missing = run_async(
-        delete_document(document_repository, "kb_target", "doc_missing")
-    )
-
-    assert wrong_kb is None
-    assert missing is None
-    assert target.status == UPLOADED_STATUS
-    assert other_kb.status == UPLOADED_STATUS
-    assert other_user.status == UPLOADED_STATUS
-
-
 def test_document_api_can_upload_and_list_documents():
     knowledge_base = make_knowledge_base("kb_active")
     knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
@@ -823,17 +1027,11 @@ def test_document_api_can_upload_and_list_documents():
     assert uploaded["file_size"] == 5
     assert uploaded["storage_bucket"] == DEFAULT_DOCUMENT_BUCKET
     assert uploaded["status"] == "uploaded"
-    assert uploaded["task_id"] == f"task_{uploaded['id']}"
+    assert uploaded["task_id"] is None
     assert uploaded["error_message"] is None
     assert chunk_repository.items == []
     assert vector_service.calls == []
-    assert processing_queue.calls == [
-        {
-            "kb_id": knowledge_base.id,
-            "document_id": uploaded["id"],
-            "chunk_settings": None,
-        }
-    ]
+    assert processing_queue.calls == []
 
     assert list_response.status_code == 200
     assert list_response.json() == [uploaded]
@@ -875,7 +1073,7 @@ def test_document_api_upload_does_not_enqueue_unsupported_document():
     assert processing_queue.calls == []
 
 
-def test_document_upload_api_passes_chunk_settings_to_queue():
+def test_document_upload_api_accepts_chunk_settings_without_enqueueing():
     knowledge_base = make_knowledge_base("kb_active")
     knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
     document_repository = InMemoryDocumentRepository()
@@ -916,19 +1114,9 @@ def test_document_upload_api_passes_chunk_settings_to_queue():
 
     assert upload_response.status_code == 201
     uploaded = upload_response.json()
-    assert processing_queue.calls == [
-        {
-            "kb_id": knowledge_base.id,
-            "document_id": uploaded["id"],
-            "chunk_settings": {
-                "separator": "\\n\\n",
-                "chunk_size": 8,
-                "chunk_overlap": 2,
-                "replace_consecutive_whitespace": True,
-                "remove_urls_and_emails": False,
-            },
-        }
-    ]
+    assert uploaded["status"] == "uploaded"
+    assert uploaded["task_id"] is None
+    assert processing_queue.calls == []
 
 
 def test_document_process_api_enqueues_supported_document_for_retry():
@@ -960,11 +1148,14 @@ def test_document_process_api_enqueues_supported_document_for_retry():
         "message": "Document processing queued",
         "document_id": document.id,
         "task_id": f"task_{document.id}",
-        "status": "uploaded",
+        "status": "parsing",
     }
+    assert document.status == "parsing"
+    assert document.error_message is None
     assert document.task_id == f"task_{document.id}"
     assert processing_queue.calls == [
         {
+            "user_id": DEFAULT_USER_ID,
             "kb_id": knowledge_base.id,
             "document_id": document.id,
             "chunk_settings": None,
@@ -1003,6 +1194,7 @@ def test_document_process_api_passes_chunk_settings_to_queue():
     assert response.status_code == 200
     assert processing_queue.calls == [
         {
+            "user_id": DEFAULT_USER_ID,
             "kb_id": knowledge_base.id,
             "document_id": document.id,
             "chunk_settings": {
@@ -1014,6 +1206,126 @@ def test_document_process_api_passes_chunk_settings_to_queue():
             },
         }
     ]
+
+
+def test_document_process_api_rejects_duplicate_submission_while_processing():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
+    document.status = "embedding"
+    document.task_id = "task_existing"
+    document_repository.items.append(document)
+    processing_queue = FakeProcessingQueue()
+
+    app.dependency_overrides[get_knowledge_base_repository] = (
+        lambda: knowledge_base_repository
+    )
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_processing_queue] = lambda: processing_queue
+    try:
+        client = TestClient(app)
+        response = client.post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/process"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Document is already processing"
+    assert document.task_id == "task_existing"
+    assert document.status == "embedding"
+    assert processing_queue.calls == []
+
+
+def test_document_process_api_marks_document_failed_when_queue_submission_fails():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
+    document_repository.items.append(document)
+
+    app.dependency_overrides[get_knowledge_base_repository] = lambda: knowledge_base_repository
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_processing_queue] = lambda: FailingProcessingQueue()
+    try:
+        response = TestClient(app).post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/process"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Document processing queue is unavailable"}
+    assert document.status == "failed"
+    assert document.error_message == "Celery unavailable"
+
+
+def test_document_process_api_rejects_document_being_deleted():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
+    document.status = DELETING_STATUS
+    document_repository.items.append(document)
+    processing_queue = FakeProcessingQueue()
+
+    app.dependency_overrides[get_knowledge_base_repository] = lambda: knowledge_base_repository
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_processing_queue] = lambda: processing_queue
+    try:
+        response = TestClient(app).post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/process"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Document is deleting"}
+    assert processing_queue.calls == []
+
+
+def test_document_processing_status_api_returns_task_error_and_chunk_counts():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
+    document.status = "failed"
+    document.task_id = "task_failed"
+    document.error_message = "Ollama unavailable"
+    document_repository.items.append(document)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    chunk_repository.items.extend(
+        [
+            make_chunk("chunk_embedded", document, 0, "embedded", "vec_1", now),
+            make_chunk("chunk_pending", document, 1, "chunked", None, now),
+        ]
+    )
+
+    app.dependency_overrides[get_knowledge_base_repository] = (
+        lambda: knowledge_base_repository
+    )
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
+    try:
+        client = TestClient(app)
+        response = client.get(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/processing-status"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "document_id": document.id,
+        "status": "failed",
+        "task_id": "task_failed",
+        "error_message": "Ollama unavailable",
+        "total_chunks": 2,
+        "embedded_chunks": 1,
+        "pending_chunks": 1,
+    }
 
 
 def test_document_processing_task_filters_supported_chunk_settings_for_service():
@@ -1038,15 +1350,51 @@ def test_document_processing_task_filters_supported_chunk_settings_for_service()
     }
 
 
+def test_document_processing_task_normalizes_new_and_legacy_argument_shapes():
+    assert _normalize_task_args(
+        "default_user",
+        "kb_target",
+        "doc_target",
+        {"chunk_size": 300},
+    ) == (
+        "default_user",
+        "kb_target",
+        "doc_target",
+        {"chunk_size": 300},
+    )
+    assert _normalize_task_args(
+        "kb_legacy",
+        "doc_legacy",
+        {"chunk_size": 200},
+        None,
+    ) == (
+        DEFAULT_USER_ID,
+        "kb_legacy",
+        "doc_legacy",
+        {"chunk_size": 200},
+    )
+
+
 def test_document_api_can_hard_delete_document_by_id():
     knowledge_base = make_knowledge_base("kb_active")
     knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
     document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
     vector_service = FakeVectorService()
     document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
     document.parsed_bucket = "rag-parsed-results"
     document.parsed_object_key = "parsed/doc_target.json"
     document_repository.items.append(document)
+    chunk_repository.items.append(
+        make_chunk(
+            "chunk_target",
+            document,
+            0,
+            "embedded",
+            "vec_target",
+            datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+    )
     storage = InMemoryDocumentStorage()
     storage.objects[(document.storage_bucket, document.storage_object_key)] = {
         "data": b"raw",
@@ -1061,6 +1409,7 @@ def test_document_api_can_hard_delete_document_by_id():
         lambda: knowledge_base_repository
     )
     app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
     app.dependency_overrides[get_vector_service] = lambda: vector_service
     app.dependency_overrides[get_document_storage] = lambda: storage
     try:
@@ -1079,8 +1428,10 @@ def test_document_api_can_hard_delete_document_by_id():
     assert deleted["id"] == document.id
     assert deleted["knowledge_base_id"] == knowledge_base.id
     assert deleted["user_id"] == DEFAULT_USER_ID
-    assert deleted["status"] == UPLOADED_STATUS
-    assert document not in document_repository.items
+    assert deleted["status"] == DELETED_STATUS
+    assert document in document_repository.items
+    assert document.status == DELETED_STATUS
+    assert chunk_repository.items == []
     assert vector_service.deleted_documents == [
         {
             "user_id": DEFAULT_USER_ID,
@@ -1097,6 +1448,7 @@ def test_document_api_can_hard_delete_document_by_id():
 def test_document_api_returns_404_when_delete_knowledge_base_is_missing():
     knowledge_base_repository = InMemoryKnowledgeBaseRepository()
     document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
     document_repository.items.append(
         make_document("doc_target", "kb_missing", DEFAULT_USER_ID)
     )
@@ -1105,6 +1457,7 @@ def test_document_api_returns_404_when_delete_knowledge_base_is_missing():
         lambda: knowledge_base_repository
     )
     app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
     try:
         client = TestClient(app)
         response = client.delete(
@@ -1121,6 +1474,7 @@ def test_document_api_returns_404_when_delete_document_is_not_visible():
     knowledge_base = make_knowledge_base("kb_active")
     knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
     document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
     document_repository.items.append(
         make_document("doc_target", "kb_other", DEFAULT_USER_ID)
     )
@@ -1129,6 +1483,7 @@ def test_document_api_returns_404_when_delete_document_is_not_visible():
         lambda: knowledge_base_repository
     )
     app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
     try:
         client = TestClient(app)
         response = client.delete(
@@ -1267,7 +1622,7 @@ def test_document_processing_api_parse_chunk_status_and_embed_text_document():
     assert len(chunk_payload) == 1
     assert chunk_payload[0]["document_id"] == document.id
     assert chunk_payload[0]["content"] == "hello world\nsecond paragraph"
-    assert chunk_payload[0]["status"] == "created"
+    assert chunk_payload[0]["status"] == "chunked"
     assert status_before_embed_response.status_code == 200
     assert status_before_embed_response.json() == {
         "document_id": document.id,
@@ -1286,6 +1641,69 @@ def test_document_processing_api_parse_chunk_status_and_embed_text_document():
     }
     assert status_after_embed_response.status_code == 200
     assert status_after_embed_response.json() == embed_response.json()
+
+
+def test_document_processing_api_can_chunk_uploaded_text_without_parse_step():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    embedding_service = FakeEmbeddingService(dimension=1024)
+    vector_service = FakeVectorService()
+    document = make_document("doc_target", knowledge_base.id, DEFAULT_USER_ID)
+    document.file_name = "doc_target.txt"
+    document.file_type = "text/plain"
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {
+        "data": "第一段内容。\n\n第二段内容。".encode("utf-8"),
+        "content_type": document.file_type,
+    }
+    document_repository.items.append(document)
+
+    app.dependency_overrides[get_knowledge_base_repository] = (
+        lambda: knowledge_base_repository
+    )
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
+    app.dependency_overrides[get_document_storage] = lambda: storage
+    app.dependency_overrides[get_embedding_service] = lambda: embedding_service
+    app.dependency_overrides[get_vector_service] = lambda: vector_service
+    try:
+        client = TestClient(app)
+        chunks_response = client.post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/chunks"
+        )
+        embed_response = client.post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/embed"
+        )
+        status_response = client.get(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/embedding-status"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert chunks_response.status_code == 200
+    assert [chunk["content"] for chunk in chunks_response.json()] == [
+        "第一段内容。",
+        "第二段内容。",
+    ]
+    assert all(chunk["status"] == "chunked" for chunk in chunks_response.json())
+    assert vector_service.deleted_documents[0] == {
+        "user_id": DEFAULT_USER_ID,
+        "knowledge_base_id": knowledge_base.id,
+        "document_id": document.id,
+    }
+    assert embed_response.status_code == 200
+    assert embed_response.json() == {
+        "document_id": document.id,
+        "status": "embedded",
+        "total_chunks": 2,
+        "embedded_chunks": 2,
+        "pending_chunks": 0,
+    }
+    assert status_response.status_code == 200
+    assert status_response.json() == embed_response.json()
+    assert document.status == "embedded"
 
 
 def make_knowledge_base(kb_id):

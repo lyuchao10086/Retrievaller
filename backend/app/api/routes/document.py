@@ -22,16 +22,20 @@ from app.schemas.document import (
     EmbeddingStatusResponse,
     ParsedDocumentResponse,
     ParseTaskResponse,
+    ProcessingStatusResponse,
 )
 from app.services.document import (
+    DELETING_STATUS,
+    FAILED_STATUS,
     DocumentNotFoundError,
     UnsupportedDocumentTypeError,
     create_document_chunks,
-    delete_document,
+    delete_document_with_cleanup,
     delete_document_storage_objects,
     embed_document_chunks,
     get_document_by_id,
     get_document_embedding_status,
+    get_document_processing_status,
     get_parsed_document_payload,
     is_supported_text_document,
     list_document_chunks,
@@ -58,6 +62,7 @@ class ProcessingQueue(Protocol):
 
     def delay(
         self,
+        user_id: str,
         kb_id: str,
         document_id: str,
         chunk_settings: dict[str, object] | None = None,
@@ -141,11 +146,10 @@ async def upload_document_api(
         Depends(get_document_repository),
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
-    processing_queue: Annotated[ProcessingQueue, Depends(get_processing_queue)],
     settings: Annotated[Settings, Depends(get_settings)],
     chunk_settings: Annotated[str | None, Form()] = None,
 ) -> DocumentResponse:
-    """上传原始文件；txt/markdown 入队后台处理，响应不等待 embedding。"""
+    """上传原始文件；处理由 /process 接口显式提交后台任务。"""
     content = await file.read()
     file_name = file.filename or "uploaded_file"
     file_type = file.content_type
@@ -164,22 +168,8 @@ async def upload_document_api(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Knowledge base not found",
         )
-
-    if not is_supported_text_document(file_name, file_type):
-        return DocumentResponse.model_validate(document)
-
-    chunk_settings_payload = _parse_chunk_settings_form(chunk_settings)
-    task = processing_queue.delay(kb_id, document.id, chunk_settings_payload)
-    queued_document = (
-        await document_repository.set_task_id_by_id_and_knowledge_base(
-            DEFAULT_USER_ID,
-            kb_id,
-            document.id,
-            task.id,
-            _utc_now(),
-        )
-    )
-    return DocumentResponse.model_validate(queued_document or document)
+    _parse_chunk_settings_form(chunk_settings)
+    return DocumentResponse.model_validate(document)
 
 
 @router.get("", response_model=list[DocumentResponse])
@@ -286,17 +276,47 @@ async def process_document_api(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only txt, md and markdown documents are supported",
         )
+    if document.status == DELETING_STATUS:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is deleting",
+        )
+    if document.status in {"parsing", "chunking", "embedding"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is already processing",
+        )
 
-    await document_repository.update_status_by_id_and_knowledge_base(
+    queued_status_document = await document_repository.update_status_by_id_and_knowledge_base(
         DEFAULT_USER_ID,
         kb_id,
         document_id,
-        "uploaded",
+        "parsing",
         None,
         _utc_now(),
     )
+    if queued_status_document is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is not available for processing",
+        )
+
     chunk_settings = body.model_dump() if body is not None else None
-    task = processing_queue.delay(kb_id, document_id, chunk_settings)
+    try:
+        task = processing_queue.delay(DEFAULT_USER_ID, kb_id, document_id, chunk_settings)
+    except Exception as exc:
+        await document_repository.update_status_by_id_and_knowledge_base(
+            DEFAULT_USER_ID,
+            kb_id,
+            document_id,
+            FAILED_STATUS,
+            str(exc),
+            _utc_now(),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document processing queue is unavailable",
+        ) from exc
     queued_document = await document_repository.set_task_id_by_id_and_knowledge_base(
         DEFAULT_USER_ID,
         kb_id,
@@ -308,7 +328,7 @@ async def process_document_api(
         message="Document processing queued",
         document_id=document_id,
         task_id=task.id,
-        status=(queued_document or document).status,
+        status=(queued_document or queued_status_document or document).status,
     )
 
 
@@ -365,14 +385,19 @@ async def create_chunks_api(
         Depends(get_chunk_repository),
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
+    vector_service: Annotated[
+        VectorService,
+        Depends(get_vector_service),
+    ],
 ) -> list[ChunkResponse]:
-    """基于解析结果同步生成 chunks，默认 500 字符、50 overlap。"""
+    """基于原始文本或解析结果同步生成 chunks，默认 500 字符、50 overlap。"""
     await _ensure_knowledge_base(knowledge_base_repository, kb_id)
     try:
         chunks = await create_document_chunks(
             document_repository=document_repository,
             chunk_repository=chunk_repository,
             storage=storage,
+            vector_service=vector_service,
             kb_id=kb_id,
             document_id=document_id,
         )
@@ -386,10 +411,20 @@ async def create_chunks_api(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Parsed document not found",
         ) from exc
+    except UnsupportedDocumentTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document chunking failed",
         ) from exc
     return [ChunkResponse.model_validate(chunk) for chunk in chunks]
 
@@ -476,6 +511,11 @@ async def embed_document_api(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Document embedding failed",
+        ) from exc
     return EmbeddingStatusResponse.model_validate(payload)
 
 
@@ -513,6 +553,40 @@ async def get_embedding_status_api(
     return EmbeddingStatusResponse.model_validate(payload)
 
 
+@router.get("/{document_id}/processing-status", response_model=ProcessingStatusResponse)
+async def get_processing_status_api(
+    kb_id: str,
+    document_id: str,
+    knowledge_base_repository: Annotated[
+        KnowledgeBaseRepository,
+        Depends(get_knowledge_base_repository),
+    ],
+    document_repository: Annotated[
+        DocumentRepository,
+        Depends(get_document_repository),
+    ],
+    chunk_repository: Annotated[
+        ChunkRepository,
+        Depends(get_chunk_repository),
+    ],
+) -> ProcessingStatusResponse:
+    """返回文档后台处理进度，包含 Celery task_id、错误和 chunk 统计。"""
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    try:
+        payload = await get_document_processing_status(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            kb_id=kb_id,
+            document_id=document_id,
+        )
+    except DocumentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found",
+        ) from exc
+    return ProcessingStatusResponse.model_validate(payload)
+
+
 @router.delete("/{document_id}", response_model=DocumentResponse)
 async def delete_document_api(
     kb_id: str,
@@ -525,13 +599,17 @@ async def delete_document_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    chunk_repository: Annotated[
+        ChunkRepository,
+        Depends(get_chunk_repository),
+    ],
     vector_service: Annotated[
         VectorService,
         Depends(get_vector_service),
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
 ) -> DocumentResponse:
-    """硬删除指定知识库下的文档元数据、对象存储文件和关联向量。"""
+    """按可重试顺序清理文档索引和对象，并保留 deleted 生命周期终态。"""
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
         kb_id,
         DEFAULT_USER_ID,
@@ -549,18 +627,20 @@ async def delete_document_api(
             detail="Document not found",
         )
 
-    await delete_document_storage_objects(storage, document)
-    vector_service.delete_chunk_embeddings_by_document(
-        DEFAULT_USER_ID,
-        kb_id,
-        document_id,
-    )
-    document = await delete_document(document_repository, kb_id, document_id)
-    if document is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document not found",
+    try:
+        document = await delete_document_with_cleanup(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            storage=storage,
+            vector_service=vector_service,
+            kb_id=kb_id,
+            document_id=document_id,
         )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Document deletion is pending retry",
+        ) from exc
     return DocumentResponse.model_validate(document)
 
 

@@ -2,10 +2,12 @@ export type DocumentStatus =
   | "uploaded"
   | "parsing"
   | "parsed"
+  | "chunking"
   | "chunked"
   | "embedding"
   | "embedded"
   | "failed"
+  | "deleting"
   | "deleted"
   | string
 
@@ -67,4 +69,9 @@ export type EmbeddingStatus = {
   total_chunks: number
   embedded_chunks: number
   pending_chunks: number
+}
+
+export type ProcessingStatus = EmbeddingStatus & {
+  task_id?: string | null
+  error_message?: string | null
 }

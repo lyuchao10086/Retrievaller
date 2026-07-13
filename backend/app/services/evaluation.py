@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
@@ -5,7 +6,7 @@ from uuid import uuid4
 
 from app.models.evaluation import Evaluation
 from app.models.qa_record import QaRecord
-from app.repositories.evaluation import EvaluationRepository
+from app.repositories.evaluation import EvaluationAlreadyExistsError, EvaluationRepository
 from app.repositories.qa_record import QaRecordRepository
 from app.services.deepseek_service import DeepSeekService
 from app.services.knowledge_base import DEFAULT_USER_ID
@@ -41,6 +42,10 @@ class DeepSeekInvalidJSONError(ValueError):
         self.raw_response = raw_response
 
 
+# 同一 API 进程内合并同一问答记录的并发评估请求，避免重复消耗外部模型调用。
+_EVALUATION_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+
+
 async def create_evaluation_for_qa_record(
     qa_record_repository: QaRecordRepository,
     evaluation_repository: EvaluationRepository,
@@ -52,13 +57,6 @@ async def create_evaluation_for_qa_record(
 
     如果已经评估过，直接返回已有结果，避免重复调用 DeepSeek。
     """
-    existing = await evaluation_repository.get_by_qa_record_id_and_user(
-        qa_record_id,
-        user_id,
-    )
-    if existing is not None:
-        return existing
-
     qa_record = await qa_record_repository.get_by_id_and_user(
         qa_record_id,
         user_id,
@@ -66,21 +64,47 @@ async def create_evaluation_for_qa_record(
     if qa_record is None:
         raise QaRecordNotFoundError("Qa record not found")
 
-    raw_response = await deepseek_service.chat(
-        SYSTEM_PROMPT,
-        _build_user_prompt(qa_record),
-    )
-    payload = _parse_evaluation_json(raw_response)
-    evaluation = _build_evaluation(qa_record, payload, raw_response, user_id)
-    return await evaluation_repository.insert(evaluation)
+    lock = _EVALUATION_LOCKS.setdefault((user_id, qa_record_id), asyncio.Lock())
+    async with lock:
+        existing = await evaluation_repository.get_by_qa_record_id_and_user(
+            qa_record_id,
+            user_id,
+        )
+        if existing is not None:
+            return existing
+
+        raw_response = await deepseek_service.chat(
+            SYSTEM_PROMPT,
+            _build_user_prompt(qa_record),
+        )
+        payload = _parse_evaluation_json(raw_response)
+        evaluation = _build_evaluation(qa_record, payload, raw_response, user_id)
+        try:
+            return await evaluation_repository.insert(evaluation)
+        except EvaluationAlreadyExistsError:
+            existing = await evaluation_repository.get_by_qa_record_id_and_user(
+                qa_record_id,
+                user_id,
+            )
+            if existing is not None:
+                return existing
+            raise
 
 
 async def get_evaluation_by_qa_record_id(
+    qa_record_repository: QaRecordRepository,
     evaluation_repository: EvaluationRepository,
     qa_record_id: str,
     user_id: str = DEFAULT_USER_ID,
 ) -> Evaluation:
     """查询指定问答记录的评估结果。"""
+    qa_record = await qa_record_repository.get_by_id_and_user(
+        qa_record_id,
+        user_id,
+    )
+    if qa_record is None:
+        raise QaRecordNotFoundError("Qa record not found")
+
     evaluation = await evaluation_repository.get_by_qa_record_id_and_user(
         qa_record_id,
         user_id,
@@ -186,7 +210,7 @@ def _build_evaluation(
         relevance_score=_score(payload.get("relevance_score")),
         citation_score=_score(payload.get("citation_score")),
         completeness_score=_score(payload.get("completeness_score")),
-        hallucination=bool(payload.get("hallucination")),
+        hallucination=_boolean(payload.get("hallucination")),
         overall_score=_score(payload.get("overall_score")),
         reason=str(payload.get("reason") or ""),
         raw_response=raw_response,
@@ -203,6 +227,18 @@ def _score(value: object) -> int:
     if score < 1 or score > 5:
         raise ValueError("Evaluation score must be between 1 and 5")
     return score
+
+
+def _boolean(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    raise ValueError("Evaluation hallucination must be a boolean")
 
 
 def _now() -> datetime:

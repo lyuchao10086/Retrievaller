@@ -218,6 +218,45 @@ def test_multi_rag_answer_returns_503_when_local_llm_is_unavailable():
     assert response.json() == {"detail": LOCAL_LLM_UNAVAILABLE_MESSAGE}
 
 
+def test_multi_rag_answer_ignores_milvus_hit_when_document_is_not_embedded():
+    chunk = make_chunk("chunk_target", "doc_target", "kb_target")
+    vector_hit = VectorSearchResult(
+        chunk_id=chunk.id,
+        document_id="doc_target",
+        knowledge_base_id="kb_target",
+        user_id=DEFAULT_USER_ID,
+        score=0.91,
+    )
+
+    app.dependency_overrides[get_knowledge_base_repository] = lambda: InMemoryKnowledgeBaseRepository(
+        [make_knowledge_base("kb_target")]
+    )
+    app.dependency_overrides[get_chunk_repository] = lambda: FakeChunkRepository(
+        has_embedded=True,
+        chunks=[chunk],
+    )
+    app.dependency_overrides[get_document_repository] = lambda: FakeDocumentRepository()
+    app.dependency_overrides[get_embedding_service] = lambda: FakeEmbeddingService()
+    app.dependency_overrides[get_vector_service] = lambda: FakeVectorService([vector_hit])
+    app.dependency_overrides[get_local_llm_service] = lambda: FakeLocalLLMService()
+    app.dependency_overrides[get_qa_record_repository] = lambda: FakeQaRecordRepository()
+    try:
+        response = TestClient(app).post(
+            "/api/rag/answer",
+            json={
+                "query": "问题",
+                "knowledge_base_ids": ["kb_target"],
+                "top_k": 5,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == NO_MULTI_RETRIEVAL_ANSWER
+    assert response.json()["sources"] == []
+
+
 def make_knowledge_base(kb_id: str) -> KnowledgeBase:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     return KnowledgeBase(

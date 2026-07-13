@@ -74,6 +74,8 @@ async def retrieve_chunks_for_query(
         if chunk is None:
             continue
         document = document_by_id.get(chunk.document_id)
+        if document is None:
+            continue
         retrieved.append(
             RetrievedChunk(
                 chunk_id=chunk.id,
@@ -82,7 +84,7 @@ async def retrieve_chunks_for_query(
                 score=hit.score,
                 content=chunk.content,
                 source=RetrievedSourceInfo(
-                    file_name=document.file_name if document else chunk.document_id,
+                    file_name=document.file_name,
                     chapter=chunk.chapter,
                     section=chunk.section,
                     subsection=chunk.subsection,
@@ -144,6 +146,8 @@ async def retrieve_chunks_for_query_in_knowledge_bases(
             continue
         document = document_by_id.get(chunk.document_id)
         knowledge_base = knowledge_base_by_id.get(chunk.knowledge_base_id)
+        if document is None or knowledge_base is None:
+            continue
         retrieved.append(
             RetrievedChunk(
                 chunk_id=chunk.id,
@@ -152,7 +156,7 @@ async def retrieve_chunks_for_query_in_knowledge_bases(
                 score=hit.score,
                 content=chunk.content,
                 source=RetrievedSourceInfo(
-                    file_name=document.file_name if document else chunk.document_id,
+                    file_name=document.file_name,
                     chapter=chunk.chapter,
                     section=chunk.section,
                     subsection=chunk.subsection,

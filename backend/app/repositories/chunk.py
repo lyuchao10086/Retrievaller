@@ -25,6 +25,14 @@ class ChunkRepository(Protocol):
     ) -> list[Chunk]:
         raise NotImplementedError
 
+    async def delete_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> list[Chunk]:
+        raise NotImplementedError
+
     async def update_embedding_results(
         self,
         user_id: str,
@@ -178,6 +186,27 @@ class MySQLChunkRepository:
             rows = await cursor.fetchall()
         return [self._from_row(row) for row in rows]
 
+    async def delete_by_document(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+    ) -> list[Chunk]:
+        """删除指定文档的 chunk 元数据；重复执行时保持幂等。"""
+        chunks = await self.list_by_document(user_id, knowledge_base_id, document_id)
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                DELETE FROM chunks
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND document_id = %s
+                """,
+                (user_id, knowledge_base_id, document_id),
+            )
+        await self.connection.commit()
+        return chunks
+
     async def update_embedding_results(
         self,
         user_id: str,
@@ -280,6 +309,8 @@ class MySQLChunkRepository:
                 FROM chunks
                 WHERE user_id = %s
                   AND knowledge_base_id = %s
+                  AND status = 'embedded'
+                  AND vector_id IS NOT NULL
                   AND id IN ({placeholders})
                 """,
                 (user_id, knowledge_base_id, *chunk_ids),
@@ -320,6 +351,8 @@ class MySQLChunkRepository:
                 FROM chunks
                 WHERE user_id = %s
                   AND knowledge_base_id IN ({kb_placeholders})
+                  AND status = 'embedded'
+                  AND vector_id IS NOT NULL
                   AND id IN ({chunk_placeholders})
                 """,
                 (user_id, *knowledge_base_ids, *chunk_ids),

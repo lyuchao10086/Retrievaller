@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -12,8 +13,10 @@ from app.models.evaluation import Evaluation
 from app.models.qa_record import QaRecord
 from app.services.deepseek_service import (
     DEEPSEEK_API_KEY_NOT_CONFIGURED_MESSAGE,
+    DeepSeekAPIError,
     DeepSeekConfigurationError,
 )
+from app.services.evaluation import create_evaluation_for_qa_record
 from app.services.knowledge_base import DEFAULT_USER_ID
 
 
@@ -59,17 +62,10 @@ def test_evaluations_api_lists_recent_default_user_results():
             "overall_score": target.overall_score,
             "reason": target.reason,
             "created_at": target.created_at.isoformat(),
+            "updated_at": target.updated_at.isoformat(),
+            "status": "completed",
         }
     ]
-
-
-def test_single_knowledge_base_rag_answer_route_is_removed():
-    response = TestClient(app).post(
-        "/api/knowledge-bases/kb_target/rag/answer",
-        json={"query": "hello"},
-    )
-
-    assert response.status_code == 404
 
 
 def test_create_evaluation_returns_clear_error_when_deepseek_key_is_missing():
@@ -86,7 +82,7 @@ def test_create_evaluation_returns_clear_error_when_deepseek_key_is_missing():
     finally:
         app.dependency_overrides.clear()
 
-    assert response.status_code == 500
+    assert response.status_code == 503
     assert response.json() == {"detail": DEEPSEEK_API_KEY_NOT_CONFIGURED_MESSAGE}
     assert evaluation_repository.items == []
 
@@ -110,7 +106,79 @@ def test_create_evaluation_reuses_existing_result_without_calling_deepseek():
 
     assert response.status_code == 200
     assert response.json()["id"] == existing.id
+    assert response.json()["status"] == "completed"
     assert deepseek_service.called is False
+
+
+def test_get_evaluation_returns_qa_record_not_found_before_lookup():
+    app.dependency_overrides[get_qa_record_repository] = lambda: InMemoryQaRecordRepository()
+    app.dependency_overrides[get_evaluation_repository] = lambda: InMemoryEvaluationRepository()
+    try:
+        response = TestClient(app).get("/api/evaluations/qa-records/qa_missing")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Qa record not found"}
+
+
+def test_get_evaluation_returns_evaluation_not_found_for_existing_qa_record():
+    qa_record = make_qa_record("qa_target", DEFAULT_USER_ID)
+    app.dependency_overrides[get_qa_record_repository] = lambda: InMemoryQaRecordRepository(
+        [qa_record]
+    )
+    app.dependency_overrides[get_evaluation_repository] = lambda: InMemoryEvaluationRepository()
+    try:
+        response = TestClient(app).get(f"/api/evaluations/qa-records/{qa_record.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Evaluation not found"}
+
+
+def test_create_evaluation_returns_gateway_error_when_deepseek_call_fails():
+    qa_record = make_qa_record("qa_target", DEFAULT_USER_ID)
+    app.dependency_overrides[get_qa_record_repository] = lambda: InMemoryQaRecordRepository(
+        [qa_record]
+    )
+    app.dependency_overrides[get_evaluation_repository] = lambda: InMemoryEvaluationRepository()
+    app.dependency_overrides[get_deepseek_service] = lambda: FailingDeepSeekService()
+    try:
+        response = TestClient(app).post(f"/api/evaluations/qa-records/{qa_record.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "DeepSeek API request failed"}
+
+
+def test_create_evaluation_coalesces_concurrent_requests_for_the_same_qa_record():
+    qa_record = make_qa_record("qa_target", DEFAULT_USER_ID)
+    evaluation_repository = InMemoryEvaluationRepository()
+    deepseek_service = CoordinatedDeepSeekService()
+
+    async def create_twice():
+        return await asyncio.gather(
+            create_evaluation_for_qa_record(
+                qa_record_repository=InMemoryQaRecordRepository([qa_record]),
+                evaluation_repository=evaluation_repository,
+                deepseek_service=deepseek_service,
+                qa_record_id=qa_record.id,
+            ),
+            create_evaluation_for_qa_record(
+                qa_record_repository=InMemoryQaRecordRepository([qa_record]),
+                evaluation_repository=evaluation_repository,
+                deepseek_service=deepseek_service,
+                qa_record_id=qa_record.id,
+            ),
+        )
+
+    first, second = asyncio.run(create_twice())
+
+    assert first.id == second.id
+    assert len(evaluation_repository.items) == 1
+    assert deepseek_service.calls == 1
 
 
 def make_evaluation(evaluation_id: str, qa_record_id: str, user_id: str) -> Evaluation:
@@ -180,3 +248,22 @@ class RaisingDeepSeekService:
     async def chat(self, system_prompt, user_prompt):
         self.called = True
         raise AssertionError("DeepSeek should not be called when evaluation exists")
+
+
+class CoordinatedDeepSeekService:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, system_prompt, user_prompt):
+        self.calls += 1
+        await asyncio.sleep(0)
+        return (
+            '{"faithfulness_score": 5, "relevance_score": 4, '
+            '"citation_score": 3, "completeness_score": 4, '
+            '"hallucination": false, "overall_score": 4, "reason": "测试"}'
+        )
+
+
+class FailingDeepSeekService:
+    async def chat(self, system_prompt, user_prompt):
+        raise DeepSeekAPIError("DeepSeek API request failed")
