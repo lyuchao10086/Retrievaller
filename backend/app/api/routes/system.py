@@ -48,7 +48,10 @@ async def get_system_config(
             "configured": bool(settings.deepseek_api_key.strip()),
         },
         "rerank": {
-            "enabled": False,
-            "reason": "Rerank settings are present in .env.example but not wired in backend yet.",
+            "configured": bool(
+                settings.rerank_base_url.strip() and settings.rerank_model_name.strip()
+            ),
+            "model_name": settings.rerank_model_name,
+            "reason": "Rerank is enabled per knowledge base configuration.",
         },
     }

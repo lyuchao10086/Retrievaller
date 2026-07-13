@@ -21,6 +21,9 @@ class DocumentResponse(BaseModel):
     task_id: str | None
     created_at: datetime
     updated_at: datetime
+    processing_config_json: str | None = None
+    config_version: int | None = None
+    needs_reindex: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -38,14 +41,18 @@ class ChunkSettingsRequest(BaseModel):
     """文档处理时可选的基础分段与清洗配置。"""
 
     separator: str | None = Field(default=None, max_length=32)
-    chunk_size: int = Field(default=500, ge=1, le=5000)
-    chunk_overlap: int = Field(default=50, ge=0, le=1000)
-    replace_consecutive_whitespace: bool = False
-    remove_urls_and_emails: bool = False
+    chunk_size: int | None = Field(default=None, ge=1, le=5000)
+    chunk_overlap: int | None = Field(default=None, ge=0, le=1000)
+    replace_consecutive_whitespace: bool | None = None
+    remove_urls_and_emails: bool | None = None
 
     @model_validator(mode="after")
     def chunk_overlap_must_be_smaller_than_size(self) -> "ChunkSettingsRequest":
-        if self.chunk_overlap >= self.chunk_size:
+        if (
+            self.chunk_overlap is not None
+            and self.chunk_size is not None
+            and self.chunk_overlap >= self.chunk_size
+        ):
             raise ValueError("chunk_overlap must be less than chunk_size")
         return self
 

@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from app.api.routes.knowledge_base import (
@@ -9,6 +11,7 @@ from app.api.routes.knowledge_base import (
 from app.main import app
 from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
+from app.repositories.knowledge_base import MySQLKnowledgeBaseRepository
 from app.schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from app.services.knowledge_base import (
     DEFAULT_USER_ID,
@@ -55,6 +58,43 @@ class InMemoryKnowledgeBaseRepository:
             return None
         self.items = [item for item in self.items if item is not knowledge_base]
         return knowledge_base
+
+
+class RecordingMySQLCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rowcount = 0
+        self._row = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return None
+
+    async def execute(self, query, params=()):
+        normalized = " ".join(query.split())
+        self.connection.statements.append(normalized)
+        if normalized.startswith("SELECT"):
+            self._row = self.connection.knowledge_base_row
+        elif "DELETE FROM knowledge_bases" in normalized:
+            self.rowcount = 1
+
+    async def fetchone(self):
+        return self._row
+
+
+class RecordingMySQLConnection:
+    def __init__(self, knowledge_base_row):
+        self.knowledge_base_row = knowledge_base_row
+        self.statements = []
+        self.commit_count = 0
+
+    def cursor(self, *_args, **_kwargs):
+        return RecordingMySQLCursor(self)
+
+    async def commit(self):
+        self.commit_count += 1
 
 
 class FakeVectorService:
@@ -278,6 +318,40 @@ def test_delete_knowledge_base_only_deletes_active_default_user_item():
 
     assert other_user is None
     assert missing is None
+
+
+def test_mysql_delete_knowledge_base_removes_config_before_parent_record():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    connection = RecordingMySQLConnection(
+        {
+            "id": "kb_target",
+            "user_id": DEFAULT_USER_ID,
+            "name": "待删除知识库",
+            "description": None,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    repository = MySQLKnowledgeBaseRepository(connection)
+
+    deleted = run_async(
+        repository.delete_active_by_id_and_user("kb_target", DEFAULT_USER_ID)
+    )
+
+    config_delete_index = next(
+        index
+        for index, statement in enumerate(connection.statements)
+        if "DELETE FROM knowledge_base_configs" in statement
+    )
+    knowledge_base_delete_index = next(
+        index
+        for index, statement in enumerate(connection.statements)
+        if "DELETE FROM knowledge_bases" in statement
+    )
+    assert deleted is not None
+    assert config_delete_index < knowledge_base_delete_index
+    assert connection.commit_count == 1
 
 
 def test_knowledge_base_api_can_create_and_list_items():

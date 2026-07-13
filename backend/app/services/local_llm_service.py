@@ -13,7 +13,14 @@ class LocalLLMUnavailableError(RuntimeError):
 class LocalLLMService(Protocol):
     """本地大模型调用接口，便于后续替换实现。"""
 
-    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+    async def generate_answer(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model_name: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         raise NotImplementedError
 
 
@@ -30,7 +37,14 @@ class OllamaLocalLLMService:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    async def generate_answer(self, system_prompt: str, user_prompt: str) -> str:
+    async def generate_answer(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model_name: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         """调用 Ollama /api/chat，并返回 assistant message content。"""
         try:
             async with httpx.AsyncClient(
@@ -40,12 +54,16 @@ class OllamaLocalLLMService:
                 response = await client.post(
                     "/api/chat",
                     json={
-                        "model": self.model_name,
+                        "model": model_name or self.model_name,
                         "messages": [
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
                         "stream": False,
+                        "options": {
+                            **({"temperature": temperature} if temperature is not None else {}),
+                            **({"num_predict": max_tokens} if max_tokens is not None else {}),
+                        },
                     },
                 )
                 response.raise_for_status()

@@ -398,8 +398,11 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
               </tr>
             ) : (
               filteredDocuments.map((document, index) => {
-                const availability = getDocumentAvailabilityLabel(document.status)
-                const retrievable = isDocumentRetrievable(document.status)
+                const requiresReindex = document.needs_reindex === true
+                const availability = requiresReindex
+                  ? "分段或 embedding 配置已变更，需要重新处理后才能检索"
+                  : getDocumentAvailabilityLabel(document.status)
+                const retrievable = isDocumentRetrievable(document.status) && !requiresReindex
                 const isSelected = selectedIds.has(document.id)
                 const isWorking = workingDocumentId === document.id
                 const actionDisabled = workingDocumentId !== null
@@ -445,7 +448,7 @@ export default function KnowledgeBaseDetailPage({ knowledgeBase, onBack, onChunk
                         title={availability}
                       >
                         <span className={cn("h-2 w-2 rounded-full", retrievable ? "bg-emerald-500" : "bg-amber-400")} />
-                        {getDocumentStatusLabel(document.status)}
+                        {requiresReindex ? "需重新处理" : getDocumentStatusLabel(document.status)}
                       </span>
                     </td>
                     <td className="px-3 py-3">
@@ -671,6 +674,20 @@ function DocumentActionButton({
   workingAction: "process" | null
   onProcess: () => void
 }) {
+  if (document.needs_reindex) {
+    return (
+      <button
+        type="button"
+        onClick={onProcess}
+        disabled={disabled}
+        className="inline-flex h-7 min-w-[84px] items-center justify-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 text-xs font-medium text-amber-700 transition hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {isWorking && workingAction === "process" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        {isWorking && workingAction === "process" ? "提交中" : "重新处理"}
+      </button>
+    )
+  }
+
   if (
     document.status === "uploaded" ||
     document.status === "failed" ||

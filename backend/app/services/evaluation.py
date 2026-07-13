@@ -114,6 +114,40 @@ async def get_evaluation_by_qa_record_id(
     return evaluation
 
 
+async def evaluate_answer_content(
+    deepseek_service: DeepSeekService,
+    *,
+    question: str,
+    answer: str,
+    sources_json: list[dict[str, Any]],
+    user_id: str,
+) -> dict[str, Any]:
+    """Evaluate transient benchmark output without creating a user-visible QA evaluation row."""
+    now = _now()
+    record = QaRecord(
+        id="benchmark_transient",
+        user_id=user_id,
+        title="benchmark",
+        question=question,
+        answer=answer,
+        knowledge_base_ids=[],
+        sources_json=sources_json,
+        created_at=now,
+        updated_at=now,
+    )
+    raw_response = await deepseek_service.chat(SYSTEM_PROMPT, _build_user_prompt(record))
+    payload = _parse_evaluation_json(raw_response)
+    return {
+        "faithfulness_score": _score(payload.get("faithfulness_score")),
+        "relevance_score": _score(payload.get("relevance_score")),
+        "citation_score": _score(payload.get("citation_score")),
+        "completeness_score": _score(payload.get("completeness_score")),
+        "hallucination": _boolean(payload.get("hallucination")),
+        "overall_score": _score(payload.get("overall_score")),
+        "reason": str(payload.get("reason") or ""),
+    }
+
+
 async def list_evaluations(
     evaluation_repository: EvaluationRepository,
     user_id: str = DEFAULT_USER_ID,

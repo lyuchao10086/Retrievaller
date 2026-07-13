@@ -8,11 +8,6 @@ import { Button } from "./ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card"
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
-import { Select } from "./ui/select"
-import { Slider } from "./ui/slider"
-
-const DEFAULT_TOP_K = 5
-const TOP_K_STORAGE_KEY = "retrievaller.defaultTopK"
 const HEALTH_DEPENDENCY_LABELS: Record<string, string> = {
   mysql: "MySQL",
   redis: "Redis",
@@ -20,13 +15,12 @@ const HEALTH_DEPENDENCY_LABELS: Record<string, string> = {
   milvus: "Milvus",
   ollama_embedding: "Ollama Embedding",
   ollama_llm: "Ollama LLM",
+  ollama_rerank: "Rerank 服务",
   deepseek_config: "DeepSeek 配置",
   celery_config: "Celery 配置",
 }
 
 export default function SettingsPage() {
-  const [temperature, setTemperature] = useState(0.2)
-  const [topK, setTopK] = useState(() => readStoredTopK())
   const [config, setConfig] = useState<SystemConfigResponse | null>(null)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [healthLoading, setHealthLoading] = useState(false)
@@ -70,7 +64,7 @@ export default function SettingsPage() {
     <section>
       <PageHeader
         title="设置"
-        description="查看后端运行配置与前端检索偏好。敏感密钥只在服务端环境变量中配置。"
+        description="查看后端运行配置。知识库级检索与生成参数在对应知识库中保存；敏感密钥只在服务端环境变量中配置。"
       />
 
       {error && (
@@ -129,13 +123,9 @@ export default function SettingsPage() {
             <Field label="Embedding 维度">
               <Input readOnly value={String(config?.embedding?.dimension ?? config?.embedding?.embedding_dimension ?? "") || "加载中..."} />
             </Field>
-            <div>
-              <div className="mb-2 flex items-center justify-between">
-                <Label>前端展示 Temperature</Label>
-                <span className="text-sm font-semibold">{temperature.toFixed(2)}</span>
-              </div>
-              <Slider min={0} max={1} step={0.01} value={temperature} onChange={(e) => setTemperature(Number(e.target.value))} />
-            </div>
+            <Field label="生成参数">
+              <Input readOnly value="按知识库配置（Temperature / 最大输出）" />
+            </Field>
           </CardContent>
         </Card>
 
@@ -195,25 +185,13 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <Field label="默认 Top-K">
-              <Input
-                type="number"
-                min={1}
-                max={20}
-                value={topK}
-                onChange={(event) => {
-                  const next = clampTopK(Number(event.target.value))
-                  setTopK(next)
-                  window.localStorage.setItem(TOP_K_STORAGE_KEY, String(next))
-                }}
-              />
+              <Input readOnly value="按知识库配置" />
             </Field>
             <Field label="默认检索方式">
-              <Select defaultValue="similarity">
-                <option value="similarity">相似度检索</option>
-              </Select>
+              <Input readOnly value="相似度检索（按知识库配置）" />
             </Field>
             <Field label="Rerank 状态">
-              <Input readOnly value={config?.rerank?.enabled ? "已启用" : "未接入"} />
+              <Input readOnly value={config?.rerank?.configured ? "服务已配置，按知识库启用" : "服务未配置"} />
             </Field>
             <div className="rounded-lg border bg-blue-50 p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-blue-700">
@@ -221,7 +199,7 @@ export default function SettingsPage() {
                 当前说明
               </div>
               <p className="mt-2 text-sm leading-6 text-blue-700">
-                RAG 请求会使用这里的默认 Top-K；模型、存储和 DeepSeek 密钥请在后端环境变量中配置。
+                具体知识库会保存自己的 Top-K、阈值、重排开关和生成参数；这里仅展示全局运行环境的默认模型服务。
               </p>
             </div>
           </CardContent>
@@ -229,15 +207,6 @@ export default function SettingsPage() {
       </div>
     </section>
   )
-}
-
-function readStoredTopK() {
-  return clampTopK(Number(window.localStorage.getItem(TOP_K_STORAGE_KEY)))
-}
-
-function clampTopK(value: number) {
-  if (Number.isNaN(value)) return DEFAULT_TOP_K
-  return Math.min(20, Math.max(1, value))
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -264,7 +233,10 @@ function HealthStatusTile({
         <div className="text-sm font-semibold">{label}</div>
         <Badge variant={healthBadgeVariant(state)}>{statusLabel(state)}</Badge>
       </div>
-      <p className="break-words text-xs leading-5 text-muted-foreground">{detail}</p>
+      <p className="break-words text-xs leading-5 text-muted-foreground">
+        {detail}
+        {status?.hint ? ` ${status.hint}` : ""}
+      </p>
     </div>
   )
 }

@@ -6,7 +6,11 @@ import httpx
 class EmbeddingService(Protocol):
     """文本向量化服务接口，方便后续替换成本地模型或远程 API。"""
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self,
+        texts: list[str],
+        model_name: str | None = None,
+    ) -> list[list[float]]:
         raise NotImplementedError
 
 
@@ -25,7 +29,11 @@ class OllamaEmbeddingService:
         self.timeout_seconds = timeout_seconds
         self.transport = transport
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    def embed_texts(
+        self,
+        texts: list[str],
+        model_name: str | None = None,
+    ) -> list[list[float]]:
         """把文本列表转换成向量列表。"""
         if not texts:
             return []
@@ -37,7 +45,7 @@ class OllamaEmbeddingService:
         ) as client:
             response = client.post(
                 "/api/embed",
-                json={"model": self.model_name, "input": texts},
+                    json={"model": model_name or self.model_name, "input": texts},
             )
             if response.status_code == 404:
                 return [self._embed_one_with_legacy_api(client, text) for text in texts]

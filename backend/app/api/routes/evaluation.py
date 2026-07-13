@@ -3,6 +3,7 @@ from typing import Annotated
 import aiomysql
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies.auth import CurrentUser, get_current_user
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_connection
 from app.repositories.evaluation import (
@@ -28,7 +29,11 @@ from app.services.evaluation import (
 )
 
 
-router = APIRouter(prefix="/api/evaluations", tags=["evaluations"])
+router = APIRouter(
+    prefix="/api/evaluations",
+    tags=["evaluations"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 async def get_qa_record_repository(
@@ -62,9 +67,10 @@ async def list_evaluations_api(
         EvaluationRepository,
         Depends(get_evaluation_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> EvaluationListResponse:
-    """查询 default_user 最近 50 条评估结果。"""
-    evaluations = await list_evaluations(evaluation_repository)
+    """查询当前用户最近 50 条评估结果。"""
+    evaluations = await list_evaluations(evaluation_repository, current_user.id)
     return EvaluationListResponse(
         items=[
             EvaluationResponse.model_validate(evaluation)
@@ -88,6 +94,7 @@ async def create_evaluation_api(
         DeepSeekService,
         Depends(get_deepseek_service),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> EvaluationResponse:
     """对指定 RAG 问答记录做一次 DeepSeek 忠实性评估。"""
     try:
@@ -96,6 +103,7 @@ async def create_evaluation_api(
             evaluation_repository=evaluation_repository,
             deepseek_service=deepseek_service,
             qa_record_id=qa_record_id,
+            user_id=current_user.id,
         )
     except QaRecordNotFoundError as exc:
         raise HTTPException(
@@ -137,6 +145,7 @@ async def get_evaluation_api(
         EvaluationRepository,
         Depends(get_evaluation_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> EvaluationResponse:
     """查询指定问答记录的评估结果。"""
     try:
@@ -144,6 +153,7 @@ async def get_evaluation_api(
             qa_record_repository,
             evaluation_repository,
             qa_record_id,
+            current_user.id,
         )
     except QaRecordNotFoundError as exc:
         raise HTTPException(

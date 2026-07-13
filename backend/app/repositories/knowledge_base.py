@@ -220,6 +220,36 @@ class MySQLKnowledgeBaseRepository:
         async with self.connection.cursor() as cursor:
             await cursor.execute(
                 """
+                DELETE results FROM benchmark_case_results AS results
+                INNER JOIN benchmark_runs AS runs ON runs.id = results.run_id
+                WHERE runs.knowledge_base_id = %s AND runs.user_id = %s
+                """,
+                (kb_id, user_id),
+            )
+            await cursor.execute(
+                """
+                DELETE FROM benchmark_runs
+                WHERE knowledge_base_id = %s AND user_id = %s
+                """,
+                (kb_id, user_id),
+            )
+            await cursor.execute(
+                """
+                DELETE FROM benchmark_cases
+                WHERE knowledge_base_id = %s AND user_id = %s
+                """,
+                (kb_id, user_id),
+            )
+            await cursor.execute(
+                """
+                DELETE FROM knowledge_base_configs
+                WHERE knowledge_base_id = %s
+                  AND user_id = %s
+                """,
+                (kb_id, user_id),
+            )
+            await cursor.execute(
+                """
                 DELETE FROM chunks
                 WHERE knowledge_base_id = %s
                   AND user_id = %s

@@ -1,4 +1,6 @@
 const DEFAULT_API_BASE_URL = "http://localhost:8089"
+const AUTH_SESSION_STORAGE_KEY = "retrievaller.auth-session"
+const AUTH_SESSION_EXPIRED_EVENT = "retrievaller:auth-session-expired"
 
 export const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || DEFAULT_API_BASE_URL
@@ -22,6 +24,10 @@ type RequestOptions = Omit<RequestInit, "body"> & {
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers)
+  const accessToken = readAccessToken()
+  if (accessToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${accessToken}`)
+  }
   let body = options.body as BodyInit | undefined
 
   if (body && !(body instanceof FormData) && typeof body !== "string") {
@@ -37,6 +43,10 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   })
 
   if (!response.ok) {
+    if (response.status === 401) {
+      window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY)
+      window.dispatchEvent(new Event(AUTH_SESSION_EXPIRED_EVENT))
+    }
     throw new ApiError(response.status, await readErrorDetail(response))
   }
 
@@ -45,6 +55,16 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   }
 
   return (await response.json()) as T
+}
+
+function readAccessToken(): string | null {
+  try {
+    const rawValue = window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY)
+    const value = rawValue ? JSON.parse(rawValue) : null
+    return value && typeof value.accessToken === "string" ? value.accessToken : null
+  } catch {
+    return null
+  }
 }
 
 async function readErrorDetail(response: Response): Promise<string> {

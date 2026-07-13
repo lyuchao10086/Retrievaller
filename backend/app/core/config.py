@@ -10,6 +10,7 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 class Settings(BaseSettings):
     app_name: str = "retrievaller"
     app_env: str = "development"
+    app_version: str = "development"
 
     mysql_host: str = "mysql"
     mysql_port: int = 3306
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     redis_port: int = 6379
     redis_db: int = 0
     redis_result_db: int = 1
+    celery_task_soft_time_limit_seconds: int = 900
+    celery_task_time_limit_seconds: int = 960
 
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "retrievaller"
@@ -37,12 +40,19 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     ollama_base_url: str = "http://host.docker.internal:11434"
     local_llm_model: str = "qwen3:latest"
+    rerank_base_url: str = ""
+    rerank_model_name: str = ""
 
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-pro"
 
+    jwt_secret_key: str = "development-only-change-me"
+    access_token_expire_minutes: int = 60 * 12
+
     health_check_timeout_seconds: float = 2.0
+    log_level: str = "INFO"
+    log_format: str = "json"
 
     # 前端开发服务和后端端口不同，需要显式允许跨域来源。
     cors_allow_origins: list[str] = [

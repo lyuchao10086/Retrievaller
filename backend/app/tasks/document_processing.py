@@ -1,13 +1,17 @@
 import asyncio
+from datetime import datetime, timezone
+import logging
 
 from minio import Minio
 
 from app.core.config import get_settings
 from app.core.database import get_database_pool, init_database
+from app.core.logging import bind_log_context, reset_log_context
 from app.repositories.chunk import MySQLChunkRepository
 from app.repositories.document import MySQLDocumentRepository
 from app.services.document import (
     DocumentDeletionInProgressError,
+    FAILED_STATUS,
     create_document_chunks,
     embed_document_chunks,
     parse_document_to_storage,
@@ -17,6 +21,9 @@ from app.services.embedding_service import OllamaEmbeddingService
 from app.services.knowledge_base import DEFAULT_USER_ID
 from app.services.vector_service import MilvusVectorService
 from app.tasks.celery_app import celery_app
+
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(
@@ -38,9 +45,19 @@ def process_document_task(
         document_id,
         chunk_settings,
     )
+    context_token = bind_log_context(
+        task_id=str(self.request.id or ""),
+        user_id=user_id,
+        knowledge_base_id=kb_id,
+        document_id=document_id,
+    )
     try:
-        return asyncio.run(_process_document(user_id, kb_id, document_id, chunk_settings))
+        logger.info("document_processing_started")
+        result = asyncio.run(_process_document(user_id, kb_id, document_id, chunk_settings))
+        logger.info("document_processing_completed")
+        return result
     except DocumentDeletionInProgressError:
+        logger.info("document_processing_cancelled_for_deletion")
         return {
             "user_id": user_id or DEFAULT_USER_ID,
             "kb_id": kb_id,
@@ -48,9 +65,17 @@ def process_document_task(
             "status": "deleting",
         }
     except Exception as exc:
+        logger.exception(
+            "document_processing_failed",
+            extra={"error_code": "document_processing_failed"},
+        )
         if self.request.retries < self.max_retries:
+            logger.warning("document_processing_retry_scheduled")
             raise self.retry(exc=exc, countdown=5) from exc
+        asyncio.run(_mark_document_failed(user_id, kb_id, document_id))
         raise
+    finally:
+        reset_log_context(context_token)
 
 
 async def _process_document(
@@ -73,8 +98,13 @@ async def _process_document(
                 secure=settings.minio_secure,
             )
         )
+        embedding_model_name = str(
+            (chunk_settings or {}).get(
+                "embedding_model_name", settings.embedding_model_name
+            )
+        )
         embedding_service = OllamaEmbeddingService(
-            model_name=settings.embedding_model_name,
+            model_name=embedding_model_name,
             base_url=settings.ollama_base_url,
         )
         vector_service = MilvusVectorService(
@@ -110,6 +140,7 @@ async def _process_document(
             kb_id=kb_id,
             document_id=document_id,
             expected_embedding_dimension=settings.embedding_dimension,
+            embedding_model_name=embedding_model_name,
             user_id=user_id or DEFAULT_USER_ID,
         )
 
@@ -119,6 +150,27 @@ async def _process_document(
         "document_id": document_id,
         "status": "embedded",
     }
+
+
+async def _mark_document_failed(user_id: str, kb_id: str, document_id: str) -> None:
+    """Persist a safe failure summary when setup fails before service-level cleanup."""
+    try:
+        await init_database()
+        pool = await get_database_pool()
+        async with pool.acquire() as connection:
+            await MySQLDocumentRepository(connection).update_status_by_id_and_knowledge_base(
+                user_id,
+                kb_id,
+                document_id,
+                FAILED_STATUS,
+                "Document processing task failed; inspect logs with the task ID",
+                datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+    except Exception:
+        logger.exception(
+            "document_failure_status_update_failed",
+            extra={"error_code": "document_failure_status_update_failed"},
+        )
 
 
 def _chunk_settings_kwargs(

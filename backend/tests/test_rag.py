@@ -11,10 +11,17 @@ from app.api.routes.rag import (
     get_qa_record_repository,
     get_vector_service,
 )
+from app.api.routes.knowledge_base import get_knowledge_base_config_repository
 from app.main import app
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
+from app.models.knowledge_base_config import (
+    GenerationConfig,
+    KnowledgeBaseConfig,
+    ProcessingConfig,
+    RetrievalConfig,
+)
 from app.services.knowledge_base import DEFAULT_USER_ID
 from app.services.local_llm_service import (
     LOCAL_LLM_UNAVAILABLE_MESSAGE,
@@ -53,6 +60,15 @@ class FakeChunkRepository:
             and chunk.user_id == user_id
         ]
 
+    async def list_by_ids(self, user_id, knowledge_base_id, chunk_ids):
+        return [
+            chunk
+            for chunk in self.chunks
+            if chunk.id in chunk_ids
+            and chunk.knowledge_base_id == knowledge_base_id
+            and chunk.user_id == user_id
+        ]
+
 
 class FakeDocumentRepository:
     def __init__(self, documents=None):
@@ -64,6 +80,15 @@ class FakeDocumentRepository:
             for document in self.documents
             if document.id in document_ids
             and document.knowledge_base_id in knowledge_base_ids
+            and document.user_id == user_id
+        ]
+
+    async def list_by_ids_and_knowledge_base(self, user_id, knowledge_base_id, document_ids):
+        return [
+            document
+            for document in self.documents
+            if document.id in document_ids
+            and document.knowledge_base_id == knowledge_base_id
             and document.user_id == user_id
         ]
 
@@ -90,7 +115,11 @@ class FakeQaRecordRepository:
 
 
 class FakeEmbeddingService:
-    def embed_texts(self, texts):
+    def __init__(self):
+        self.model_names = []
+
+    def embed_texts(self, texts, model_name=None):
+        self.model_names.append(model_name)
         return [[0.1, 0.2, 0.3] for _ in texts]
 
 
@@ -107,15 +136,55 @@ class FakeVectorService:
     ):
         return self.hits[:top_k]
 
+    def search_chunk_embeddings(
+        self,
+        query_embedding,
+        user_id,
+        knowledge_base_id,
+        top_k,
+    ):
+        return [
+            hit
+            for hit in self.hits
+            if hit.knowledge_base_id == knowledge_base_id
+        ][:top_k]
+
 
 class FakeLocalLLMService:
-    async def generate_answer(self, system_prompt, user_prompt):
+    async def generate_answer(self, system_prompt, user_prompt, **_options):
         return "测试标题"
 
 
 class UnavailableLocalLLMService:
-    async def generate_answer(self, system_prompt, user_prompt):
+    async def generate_answer(self, system_prompt, user_prompt, **_options):
         raise LocalLLMUnavailableError(LOCAL_LLM_UNAVAILABLE_MESSAGE)
+
+
+class RecordingLocalLLMService:
+    def __init__(self):
+        self.calls = []
+
+    async def generate_answer(self, system_prompt, user_prompt, **options):
+        self.calls.append(options)
+        return "测试回答"
+
+
+class InMemoryKnowledgeBaseConfigRepository:
+    def __init__(self, configs):
+        self.configs = {
+            (config.knowledge_base_id, config.user_id): config for config in configs
+        }
+
+    async def get_by_knowledge_base_and_user(self, knowledge_base_id, user_id):
+        return self.configs.get((knowledge_base_id, user_id))
+
+    async def insert(self, config):
+        self.configs[(config.knowledge_base_id, config.user_id)] = config
+        return config
+
+    async def update(self, config):
+        self.configs[(config.knowledge_base_id, config.user_id)] = config
+        return config
 
 
 def test_multi_rag_answer_returns_no_retrieval_message_without_embedded_chunks():
@@ -255,6 +324,142 @@ def test_multi_rag_answer_ignores_milvus_hit_when_document_is_not_embedded():
     assert response.status_code == 200
     assert response.json()["answer"] == NO_MULTI_RETRIEVAL_ANSWER
     assert response.json()["sources"] == []
+
+
+def test_multi_rag_answer_uses_selected_knowledge_base_config():
+    knowledge_base = make_knowledge_base("kb_configured")
+    first_chunk = make_chunk("chunk_first", "doc_target", knowledge_base.id)
+    second_chunk = make_chunk("chunk_second", "doc_target", knowledge_base.id)
+    document = make_document("doc_target", knowledge_base.id)
+    vector_hits = [
+        VectorSearchResult(
+            chunk_id=first_chunk.id,
+            document_id=document.id,
+            knowledge_base_id=knowledge_base.id,
+            user_id=DEFAULT_USER_ID,
+            score=0.92,
+        ),
+        VectorSearchResult(
+            chunk_id=second_chunk.id,
+            document_id=document.id,
+            knowledge_base_id=knowledge_base.id,
+            user_id=DEFAULT_USER_ID,
+            score=0.82,
+        ),
+    ]
+    config_repository = InMemoryKnowledgeBaseConfigRepository(
+        [
+            KnowledgeBaseConfig(
+                knowledge_base_id=knowledge_base.id,
+                user_id=DEFAULT_USER_ID,
+                processing=ProcessingConfig(embedding_model_name="embed-configured"),
+                retrieval=RetrievalConfig(top_k=1, similarity_threshold=0.5),
+                generation=GenerationConfig(
+                    llm_model_name="llm-configured",
+                    temperature=0.7,
+                    max_tokens=321,
+                ),
+            )
+        ]
+    )
+    embedding_service = FakeEmbeddingService()
+    llm_service = RecordingLocalLLMService()
+
+    app.dependency_overrides[get_knowledge_base_repository] = lambda: InMemoryKnowledgeBaseRepository(
+        [knowledge_base]
+    )
+    app.dependency_overrides[get_chunk_repository] = lambda: FakeChunkRepository(
+        has_embedded=True,
+        chunks=[first_chunk, second_chunk],
+    )
+    app.dependency_overrides[get_document_repository] = lambda: FakeDocumentRepository([document])
+    app.dependency_overrides[get_embedding_service] = lambda: embedding_service
+    app.dependency_overrides[get_vector_service] = lambda: FakeVectorService(vector_hits)
+    app.dependency_overrides[get_local_llm_service] = lambda: llm_service
+    app.dependency_overrides[get_qa_record_repository] = lambda: FakeQaRecordRepository()
+    app.dependency_overrides[get_knowledge_base_config_repository] = lambda: config_repository
+    try:
+        response = TestClient(app).post(
+            "/api/rag/answer",
+            json={
+                "query": "配置是否生效？",
+                "knowledge_base_ids": [knowledge_base.id],
+                "top_k": 5,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [source["chunk_id"] for source in response.json()["sources"]] == [first_chunk.id]
+    assert embedding_service.model_names == ["embed-configured"]
+    assert llm_service.calls[0] == {
+        "model_name": "llm-configured",
+        "temperature": 0.7,
+        "max_tokens": 321,
+    }
+
+
+def test_multi_rag_answer_rejects_mismatched_generation_configs():
+    first_knowledge_base = make_knowledge_base("kb_first")
+    second_knowledge_base = make_knowledge_base("kb_second")
+    config_repository = InMemoryKnowledgeBaseConfigRepository(
+        [
+            KnowledgeBaseConfig(
+                knowledge_base_id=first_knowledge_base.id,
+                user_id=DEFAULT_USER_ID,
+                generation=GenerationConfig(
+                    llm_model_name="llm-first",
+                    temperature=0.2,
+                    max_tokens=1024,
+                ),
+            ),
+            KnowledgeBaseConfig(
+                knowledge_base_id=second_knowledge_base.id,
+                user_id=DEFAULT_USER_ID,
+                generation=GenerationConfig(
+                    llm_model_name="llm-second",
+                    temperature=0.2,
+                    max_tokens=1024,
+                ),
+            ),
+        ]
+    )
+
+    app.dependency_overrides[get_knowledge_base_repository] = lambda: InMemoryKnowledgeBaseRepository(
+        [first_knowledge_base, second_knowledge_base]
+    )
+    app.dependency_overrides[get_chunk_repository] = lambda: FakeChunkRepository(
+        has_embedded=False
+    )
+    app.dependency_overrides[get_document_repository] = FakeDocumentRepository
+    app.dependency_overrides[get_embedding_service] = FakeEmbeddingService
+    app.dependency_overrides[get_vector_service] = FakeVectorService
+    app.dependency_overrides[get_local_llm_service] = FakeLocalLLMService
+    app.dependency_overrides[get_qa_record_repository] = FakeQaRecordRepository
+    app.dependency_overrides[get_knowledge_base_config_repository] = lambda: config_repository
+    try:
+        response = TestClient(app).post(
+            "/api/rag/answer",
+            json={
+                "query": "配置不一致时应该怎样处理？",
+                "knowledge_base_ids": [
+                    first_knowledge_base.id,
+                    second_knowledge_base.id,
+                ],
+                "top_k": 5,
+            },
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": (
+            "Selected knowledge bases use different generation settings. "
+            "Select one knowledge base or align their LLM configuration."
+        )
+    }
 
 
 def make_knowledge_base(kb_id: str) -> KnowledgeBase:

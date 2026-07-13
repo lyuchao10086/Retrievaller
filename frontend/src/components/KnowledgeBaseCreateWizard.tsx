@@ -10,7 +10,7 @@ import {
   X
 } from "lucide-react"
 import { ApiError } from "@/api/client"
-import { createKnowledgeBase } from "@/api/knowledgeBaseApi"
+import { createKnowledgeBase, updateKnowledgeBaseConfig } from "@/api/knowledgeBaseApi"
 import { uploadDocument } from "@/api/documentApi"
 import { cn } from "./ui/utils"
 import { NumberInput, RadioGroup, Section, TextInput, Toggle } from "./ui/ChunkSettingsComponents"
@@ -79,6 +79,15 @@ export default function KnowledgeBaseCreateWizard({ onBack }: WizardProps) {
       const kb = await createKnowledgeBase({
         name: name.trim(),
         description: description.trim() || null
+      })
+      await updateKnowledgeBaseConfig(kb.id, {
+        processing: {
+          separator: separator || null,
+          chunk_size: chunkSize,
+          chunk_overlap: chunkOverlap,
+          replace_consecutive_whitespace: replaceConsecutiveWhitespace,
+          remove_urls_and_emails: removeUrlsAndEmails
+        }
       })
       for (const file of files) {
         await uploadDocument(kb.id, file)
@@ -411,10 +420,10 @@ function StepChunk({
       <div>
         <h4 className="text-base font-semibold text-[#1f1f1f]">文本分段与清洗</h4>
         <p className="mt-1 text-sm text-[#999]">
-          预设未来文档切分策略；当前不会影响上传后的后端处理结果。
+          基础选项会保存到本知识库，并在后续处理文档时用于切分与清洗。
         </p>
         <p className="mt-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">
-          当前配置仅作为创建向导内的预设草稿，不会随创建知识库或上传文件提交到后端。文档处理链路接入后，这些参数将用于切分与清洗。
+          分隔符、分段大小、重叠长度、连续空白替换和 URL/邮箱删除会在创建时保存。标注“后续支持”的选项暂未接入。
         </p>
       </div>
 
@@ -619,7 +628,7 @@ function StepFinish({
           </div>
         )}
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
-          以下分段与清洗配置当前仅为前端草稿，不会影响本次上传后的后端处理结果。
+          以下基础配置会保存到知识库；已上传文件将在点击“开始处理”后使用它们。
         </div>
         <SummaryRow label="分段方式" value={chunkingMethodLabels[chunkingMethod]} />
         <SummaryRow label="分隔符" value={separator || "（默认）"} />

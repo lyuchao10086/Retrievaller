@@ -76,6 +76,26 @@ async def create_tables() -> None:
         async with connection.cursor() as cursor:
             await cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS users (
+                    id VARCHAR(64) PRIMARY KEY,
+                    username VARCHAR(64) NOT NULL,
+                    password_hash VARCHAR(512) NULL,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    UNIQUE KEY uq_users_username (username)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                INSERT IGNORE INTO users (id, username, password_hash, is_active)
+                VALUES ('default_user', 'legacy_default_user', NULL, FALSE)
+                """
+            )
+            await cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS knowledge_bases (
                     id VARCHAR(64) PRIMARY KEY,
                     user_id VARCHAR(128) NOT NULL,
@@ -106,6 +126,9 @@ async def create_tables() -> None:
                     parsed_bucket VARCHAR(255) NULL,
                     parsed_object_key VARCHAR(1024) NULL,
                     task_id VARCHAR(255) NULL,
+                    processing_config_json MEDIUMTEXT NULL,
+                    config_version INT NULL,
+                    needs_reindex BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
                         ON UPDATE CURRENT_TIMESTAMP(6),
@@ -113,6 +136,25 @@ async def create_tables() -> None:
                         (user_id, knowledge_base_id, created_at),
                     INDEX idx_doc_knowledge_base_id (knowledge_base_id),
                     CONSTRAINT fk_documents_knowledge_base
+                        FOREIGN KEY (knowledge_base_id)
+                        REFERENCES knowledge_bases (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS knowledge_base_configs (
+                    knowledge_base_id VARCHAR(64) NOT NULL,
+                    user_id VARCHAR(128) NOT NULL,
+                    processing_config_json MEDIUMTEXT NOT NULL,
+                    retrieval_config_json MEDIUMTEXT NOT NULL,
+                    generation_config_json MEDIUMTEXT NOT NULL,
+                    version INT NOT NULL DEFAULT 1,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    PRIMARY KEY (knowledge_base_id, user_id),
+                    CONSTRAINT fk_kb_configs_knowledge_base
                         FOREIGN KEY (knowledge_base_id)
                         REFERENCES knowledge_bases (id)
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
@@ -195,6 +237,95 @@ async def create_tables() -> None:
                 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
                 """
             )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS benchmark_cases (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    knowledge_base_id VARCHAR(64) NOT NULL,
+                    question TEXT NOT NULL,
+                    expected_answer MEDIUMTEXT NULL,
+                    expected_document_ids_json MEDIUMTEXT NOT NULL,
+                    expected_chunk_ids_json MEDIUMTEXT NOT NULL,
+                    tags_json MEDIUMTEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    INDEX idx_benchmark_cases_user_kb_enabled
+                        (user_id, knowledge_base_id, enabled),
+                    CONSTRAINT fk_benchmark_cases_knowledge_base
+                        FOREIGN KEY (knowledge_base_id)
+                        REFERENCES knowledge_bases (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS benchmark_runs (
+                    id VARCHAR(64) PRIMARY KEY,
+                    user_id VARCHAR(128) NOT NULL,
+                    knowledge_base_id VARCHAR(64) NOT NULL,
+                    task_id VARCHAR(255) NULL,
+                    status VARCHAR(32) NOT NULL,
+                    config_snapshot_json MEDIUMTEXT NOT NULL,
+                    case_snapshot_json MEDIUMTEXT NOT NULL,
+                    case_count INT NOT NULL,
+                    metrics_json MEDIUMTEXT NULL,
+                    error_message TEXT NULL,
+                    started_at DATETIME(6) NULL,
+                    completed_at DATETIME(6) NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    INDEX idx_benchmark_runs_user_kb_created
+                        (user_id, knowledge_base_id, created_at),
+                    INDEX idx_benchmark_runs_active (user_id, knowledge_base_id, status),
+                    CONSTRAINT fk_benchmark_runs_knowledge_base
+                        FOREIGN KEY (knowledge_base_id)
+                        REFERENCES knowledge_bases (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
+            await cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS benchmark_case_results (
+                    id VARCHAR(64) PRIMARY KEY,
+                    run_id VARCHAR(64) NOT NULL,
+                    benchmark_case_id VARCHAR(64) NOT NULL,
+                    question TEXT NOT NULL,
+                    expected_answer MEDIUMTEXT NULL,
+                    expected_document_ids_json MEDIUMTEXT NOT NULL,
+                    expected_chunk_ids_json MEDIUMTEXT NOT NULL,
+                    tags_json MEDIUMTEXT NOT NULL,
+                    answer MEDIUMTEXT NULL,
+                    sources_json MEDIUMTEXT NOT NULL,
+                    returned_document_ids_json MEDIUMTEXT NOT NULL,
+                    returned_chunk_ids_json MEDIUMTEXT NOT NULL,
+                    retrieval_document_hit BOOLEAN NULL,
+                    retrieval_chunk_hit BOOLEAN NULL,
+                    citation_hit BOOLEAN NULL,
+                    faithfulness_score TINYINT NULL,
+                    relevance_score TINYINT NULL,
+                    citation_score TINYINT NULL,
+                    completeness_score TINYINT NULL,
+                    hallucination BOOLEAN NULL,
+                    overall_score TINYINT NULL,
+                    evaluation_reason TEXT NULL,
+                    duration_ms INT NOT NULL,
+                    status VARCHAR(32) NOT NULL,
+                    error_message TEXT NULL,
+                    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+                    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                        ON UPDATE CURRENT_TIMESTAMP(6),
+                    INDEX idx_benchmark_results_run_created (run_id, created_at),
+                    CONSTRAINT fk_benchmark_results_run
+                        FOREIGN KEY (run_id) REFERENCES benchmark_runs (id),
+                    CONSTRAINT fk_benchmark_results_case
+                        FOREIGN KEY (benchmark_case_id) REFERENCES benchmark_cases (id)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+                """
+            )
             await ensure_column_exists(
                 cursor,
                 table_name="qa_records",
@@ -218,6 +349,30 @@ async def create_tables() -> None:
                 table_name="documents",
                 column_name="task_id",
                 column_definition="VARCHAR(255) NULL AFTER parsed_object_key",
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="processing_config_json",
+                column_definition="MEDIUMTEXT NULL AFTER task_id",
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="config_version",
+                column_definition="INT NULL AFTER processing_config_json",
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="documents",
+                column_name="needs_reindex",
+                column_definition="BOOLEAN NOT NULL DEFAULT FALSE AFTER config_version",
+            )
+            await ensure_column_exists(
+                cursor,
+                table_name="benchmark_runs",
+                column_name="case_snapshot_json",
+                column_definition="MEDIUMTEXT NOT NULL AFTER config_snapshot_json",
             )
         await connection.commit()
 

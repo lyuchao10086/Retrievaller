@@ -1,16 +1,21 @@
 from typing import Annotated
+import logging
 
 import aiomysql
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.api.dependencies.auth import CurrentUser, get_current_user
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_connection
+from app.core.logging import bind_log_context
 from app.repositories.chunk import ChunkRepository, MySQLChunkRepository
 from app.repositories.document import DocumentRepository, MySQLDocumentRepository
 from app.repositories.knowledge_base import (
     KnowledgeBaseRepository,
     MySQLKnowledgeBaseRepository,
 )
+from app.repositories.knowledge_base_config import KnowledgeBaseConfigRepository
+from app.api.routes.knowledge_base import get_knowledge_base_config_repository
 from app.repositories.qa_record import MySQLQaRecordRepository, QaRecordRepository
 from app.schemas.qa_record import QaRecordResponse
 from app.schemas.rag import (
@@ -27,8 +32,14 @@ from app.services.local_llm_service import (
     OllamaLocalLLMService,
 )
 from app.services.rag_service import (
+    IncompatibleKnowledgeBaseGenerationConfigError,
     InvalidKnowledgeBasesError,
     answer_multi_knowledge_base_question,
+)
+from app.services.knowledge_base_config import get_or_create_knowledge_base_config
+from app.services.rerank_service import (
+    HttpRerankService,
+    RerankUnavailableError,
 )
 from app.services.qa_record import (
     create_qa_record,
@@ -42,7 +53,9 @@ from app.services.vector_service import MilvusVectorService, VectorService
 multi_router = APIRouter(
     prefix="/api/rag",
     tags=["rag"],
+    dependencies=[Depends(get_current_user)],
 )
+logger = logging.getLogger(__name__)
 
 
 async def get_knowledge_base_repository(
@@ -105,6 +118,12 @@ def get_local_llm_service(
     )
 
 
+def get_rerank_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> HttpRerankService:
+    return HttpRerankService(settings.rerank_base_url)
+
+
 @multi_router.post("/answer", response_model=MultiKnowledgeBaseRagAnswerResponse)
 async def answer_multi_knowledge_base_api(
     payload: MultiKnowledgeBaseRagAnswerRequest,
@@ -136,9 +155,32 @@ async def answer_multi_knowledge_base_api(
         QaRecordRepository,
         Depends(get_qa_record_repository),
     ],
+    config_repository: Annotated[
+        KnowledgeBaseConfigRepository,
+        Depends(get_knowledge_base_config_repository),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+    rerank_service: Annotated[HttpRerankService, Depends(get_rerank_service)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> MultiKnowledgeBaseRagAnswerResponse:
     """多知识库 RAG 问答：只在请求指定的 knowledge_base_ids 范围内检索。"""
+    bind_log_context(knowledge_base_id=",".join(payload.knowledge_base_ids))
     try:
+        knowledge_bases = await knowledge_base_repository.list_active_by_ids_and_user(
+            payload.knowledge_base_ids, current_user.id
+        )
+        found_ids = {knowledge_base.id for knowledge_base in knowledge_bases}
+        invalid_ids = [
+            kb_id for kb_id in payload.knowledge_base_ids if kb_id not in found_ids
+        ]
+        if invalid_ids:
+            raise InvalidKnowledgeBasesError(invalid_ids)
+        configs = {
+            kb_id: await get_or_create_knowledge_base_config(
+                config_repository, kb_id, current_user.id, settings
+            )
+            for kb_id in payload.knowledge_base_ids
+        }
         response = await answer_multi_knowledge_base_question(
             knowledge_base_repository=knowledge_base_repository,
             document_repository=document_repository,
@@ -149,6 +191,9 @@ async def answer_multi_knowledge_base_api(
             knowledge_base_ids=payload.knowledge_base_ids,
             query=payload.query,
             top_k=payload.top_k,
+            user_id=current_user.id,
+            configs=configs,
+            rerank_service=rerank_service,
         )
         record = await create_qa_record(
             repository=qa_record_repository,
@@ -164,6 +209,7 @@ async def answer_multi_knowledge_base_api(
                 question=response.query,
                 answer=response.answer,
             ),
+            user_id=current_user.id,
         )
         return response.model_copy(update={"qa_record_id": record.id})
     except InvalidKnowledgeBasesError as exc:
@@ -174,10 +220,25 @@ async def answer_multi_knowledge_base_api(
                 "invalid_knowledge_base_ids": exc.invalid_knowledge_base_ids,
             },
         ) from exc
+    except IncompatibleKnowledgeBaseGenerationConfigError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     except LocalLLMUnavailableError as exc:
+        logger.warning(
+            "rag_local_llm_unavailable",
+            extra={"error_code": "local_llm_unavailable"},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=LOCAL_LLM_UNAVAILABLE_MESSAGE,
+        ) from exc
+    except RerankUnavailableError as exc:
+        logger.warning("rag_rerank_unavailable", extra={"error_code": "rerank_unavailable"})
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Rerank service unavailable",
         ) from exc
 
 
@@ -187,9 +248,10 @@ async def list_rag_qa_records_api(
         QaRecordRepository,
         Depends(get_qa_record_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[QaRecordResponse]:
-    """查询 default_user 最近 50 条 RAG 问答记录。"""
-    records = await list_qa_records(qa_record_repository)
+    """查询当前用户最近 50 条 RAG 问答记录。"""
+    records = await list_qa_records(qa_record_repository, current_user.id)
     return [QaRecordResponse.model_validate(record) for record in records]
 
 
@@ -200,9 +262,10 @@ async def delete_rag_qa_record_api(
         QaRecordRepository,
         Depends(get_qa_record_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> QaRecordResponse:
-    """硬删除 default_user 的一条 RAG 问答记录。"""
-    record = await delete_qa_record(qa_record_repository, qa_record_id)
+    """硬删除当前用户的一条 RAG 问答记录。"""
+    record = await delete_qa_record(qa_record_repository, qa_record_id, current_user.id)
     if record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -218,8 +281,9 @@ async def create_rag_suggestions_api(
         LocalLLMService,
         Depends(get_local_llm_service),
     ],
+    _: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> RagSuggestionsResponse:
-    """根据当前默认知识库名称生成首页可点击的候选问题。"""
+    """为已登录用户根据知识库名称生成首页可点击的候选问题。"""
     kb_text = "、".join(payload.knowledge_base_names) or "默认知识库"
     fallback = _fallback_suggestions(kb_text, payload.count)
     try:

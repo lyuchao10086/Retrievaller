@@ -95,6 +95,22 @@ class DocumentRepository(Protocol):
     ) -> Document | None:
         raise NotImplementedError
 
+    async def mark_needs_reindex_by_knowledge_base(
+        self, user_id: str, knowledge_base_id: str, updated_at: datetime
+    ) -> int:
+        raise NotImplementedError
+
+    async def set_processing_config_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        processing_config_json: str,
+        config_version: int,
+        updated_at: datetime,
+    ) -> Document | None:
+        raise NotImplementedError
+
 
 class MySQLDocumentRepository:
     """文档持久化的 MySQL 实现。"""
@@ -121,10 +137,13 @@ class MySQLDocumentRepository:
                     parsed_bucket,
                     parsed_object_key,
                     task_id,
+                    processing_config_json,
+                    config_version,
+                    needs_reindex,
                     created_at,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     document.id,
@@ -140,6 +159,9 @@ class MySQLDocumentRepository:
                     document.parsed_bucket,
                     document.parsed_object_key,
                     document.task_id,
+                    document.processing_config_json,
+                    document.config_version,
+                    document.needs_reindex,
                     document.created_at,
                     document.updated_at,
                 ),
@@ -170,6 +192,9 @@ class MySQLDocumentRepository:
                     parsed_bucket,
                     parsed_object_key,
                     task_id,
+                    processing_config_json,
+                    config_version,
+                    needs_reindex,
                     created_at,
                     updated_at
                 FROM documents
@@ -210,6 +235,9 @@ class MySQLDocumentRepository:
                     parsed_bucket,
                     parsed_object_key,
                     task_id,
+                    processing_config_json,
+                    config_version,
+                    needs_reindex,
                     created_at,
                     updated_at
                 FROM documents
@@ -288,7 +316,10 @@ class MySQLDocumentRepository:
             await cursor.execute(
                 """
                 UPDATE documents
-                SET status = %s, error_message = %s, updated_at = %s
+                SET status = %s,
+                    error_message = %s,
+                    needs_reindex = CASE WHEN %s = 'embedded' THEN FALSE ELSE needs_reindex END,
+                    updated_at = %s
                 WHERE id = %s
                   AND user_id = %s
                   AND knowledge_base_id = %s
@@ -297,6 +328,7 @@ class MySQLDocumentRepository:
                 (
                     status,
                     error_message,
+                    status,
                     updated_at,
                     document_id,
                     user_id,
@@ -344,6 +376,42 @@ class MySQLDocumentRepository:
             user_id,
             knowledge_base_id,
             document_id,
+        )
+
+    async def set_processing_config_by_id_and_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        document_id: str,
+        processing_config_json: str,
+        config_version: int,
+        updated_at: datetime,
+    ) -> Document | None:
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE documents
+                SET processing_config_json = %s,
+                    config_version = %s,
+                    updated_at = %s
+                WHERE id = %s AND user_id = %s AND knowledge_base_id = %s
+                  AND status != 'deleted'
+                """,
+                (
+                    processing_config_json,
+                    config_version,
+                    updated_at,
+                    document_id,
+                    user_id,
+                    knowledge_base_id,
+                ),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+        if affected_rows == 0:
+            return None
+        return await self.get_by_id_and_knowledge_base(
+            user_id, knowledge_base_id, document_id
         )
 
     async def set_parse_result_by_id_and_knowledge_base(
@@ -422,12 +490,16 @@ class MySQLDocumentRepository:
                     parsed_bucket,
                     parsed_object_key,
                     task_id,
+                    processing_config_json,
+                    config_version,
+                    needs_reindex,
                     created_at,
                     updated_at
                 FROM documents
                 WHERE user_id = %s
                   AND knowledge_base_id = %s
                   AND status = 'embedded'
+                  AND needs_reindex = FALSE
                   AND id IN ({placeholders})
                 """,
                 (user_id, knowledge_base_id, *document_ids),
@@ -464,12 +536,16 @@ class MySQLDocumentRepository:
                     parsed_bucket,
                     parsed_object_key,
                     task_id,
+                    processing_config_json,
+                    config_version,
+                    needs_reindex,
                     created_at,
                     updated_at
                 FROM documents
                 WHERE user_id = %s
                   AND knowledge_base_id IN ({kb_placeholders})
                   AND status = 'embedded'
+                  AND needs_reindex = FALSE
                   AND id IN ({doc_placeholders})
                 """,
                 (user_id, *knowledge_base_ids, *document_ids),
@@ -509,6 +585,27 @@ class MySQLDocumentRepository:
             document_id,
         )
 
+    async def mark_needs_reindex_by_knowledge_base(
+        self,
+        user_id: str,
+        knowledge_base_id: str,
+        updated_at: datetime,
+    ) -> int:
+        async with self.connection.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE documents
+                SET needs_reindex = TRUE, updated_at = %s
+                WHERE user_id = %s
+                  AND knowledge_base_id = %s
+                  AND status = 'embedded'
+                """,
+                (updated_at, user_id, knowledge_base_id),
+            )
+            affected_rows = cursor.rowcount
+        await self.connection.commit()
+        return affected_rows
+
     @staticmethod
     def _from_row(row: dict[str, object]) -> Document:
         """将 aiomysql DictCursor 返回的行数据转换为内部实体。"""
@@ -536,4 +633,13 @@ class MySQLDocumentRepository:
             task_id=None if row["task_id"] is None else str(row["task_id"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            processing_config_json=(
+                None
+                if row.get("processing_config_json") is None
+                else str(row["processing_config_json"])
+            ),
+            config_version=(
+                None if row.get("config_version") is None else int(row["config_version"])
+            ),
+            needs_reindex=bool(row.get("needs_reindex", False)),
         )

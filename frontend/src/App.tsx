@@ -1,4 +1,5 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { AUTH_SESSION_EXPIRED_EVENT, readAuthSession } from "./api/authSession"
 import Sidebar from "./components/Sidebar"
 import UploadPage from "./components/UploadPage"
 import OCRPage from "./components/OCRPage"
@@ -12,12 +13,25 @@ import EvaluationPage from "./components/EvaluationPage"
 import SettingsPage from "./components/SettingsPage"
 import type { MenuKey } from "./data/mockData"
 import type { QaRecord } from "./types/rag"
+import type { AuthSession } from "./types/auth"
+import LoginPage from "./components/LoginPage"
 
 export default function App() {
+  const [session, setSession] = useState<AuthSession | null>(() => readAuthSession())
   const [active, setActive] = useState<MenuKey>("chat")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [selectedQaRecord, setSelectedQaRecord] = useState<QaRecord | null>(null)
   const [newChatToken, setNewChatToken] = useState(0)
+
+  useEffect(() => {
+    const handleExpiredSession = () => setSession(null)
+    window.addEventListener(AUTH_SESSION_EXPIRED_EVENT, handleExpiredSession)
+    return () => window.removeEventListener(AUTH_SESSION_EXPIRED_EVENT, handleExpiredSession)
+  }, [])
+
+  if (!session) {
+    return <LoginPage onAuthenticated={setSession} />
+  }
 
   const navigate = (key: MenuKey) => {
     if (key === "chat") {
@@ -52,6 +66,7 @@ export default function App() {
           collapsed={sidebarCollapsed}
           onChange={navigate}
           onSelectHistory={selectHistoryRecord}
+          username={session.username}
         />
         <main className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto bg-white">
           <div className={active === "chat" ? "h-screen min-w-0 overflow-x-hidden" : "mx-auto max-w-[1440px] p-4 lg:p-6"}>

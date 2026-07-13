@@ -1,5 +1,7 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { ArrowLeft, Save } from "lucide-react"
+import { ApiError } from "@/api/client"
+import { getKnowledgeBaseConfig, updateKnowledgeBaseConfig } from "@/api/knowledgeBaseApi"
 import type { DocumentRecord } from "@/types/document"
 import { NumberInput, RadioGroup, Section, TextInput, Toggle } from "./ui/ChunkSettingsComponents"
 
@@ -51,14 +53,63 @@ const chunkingMethods: { value: ChunkingMethod; label: string; disabled?: boolea
 export default function ChunkSettingsPage({ document, onBack }: Props) {
   const [settings, setSettings] = useState<ChunkSettings>(defaultSettings)
   const [saved, setSaved] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadSettings() {
+      setLoading(true)
+      setError("")
+      try {
+        const config = await getKnowledgeBaseConfig(document.knowledge_base_id)
+        if (cancelled) return
+        setSettings((current) => ({
+          ...current,
+          separator: config.processing.separator ?? "",
+          chunkSize: config.processing.chunk_size,
+          chunkOverlap: config.processing.chunk_overlap,
+          replaceConsecutiveWhitespace: config.processing.replace_consecutive_whitespace,
+          removeUrlsAndEmails: config.processing.remove_urls_and_emails
+        }))
+      } catch (unknownError) {
+        if (!cancelled) {
+          setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    void loadSettings()
+    return () => {
+      cancelled = true
+    }
+  }, [document.knowledge_base_id])
 
   const update = <K extends keyof ChunkSettings>(key: K, value: ChunkSettings[K]) => {
     setSettings((prev) => ({ ...prev, [key]: value }))
   }
 
-  const handleSave = () => {
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2400)
+  const handleSave = async () => {
+    setSaved(false)
+    setError("")
+    try {
+      await updateKnowledgeBaseConfig(document.knowledge_base_id, {
+        processing: {
+          separator: settings.separator || null,
+          chunk_size: settings.chunkSize,
+          chunk_overlap: settings.chunkOverlap,
+          replace_consecutive_whitespace: settings.replaceConsecutiveWhitespace,
+          remove_urls_and_emails: settings.removeUrlsAndEmails
+        }
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2400)
+    } catch (unknownError) {
+      setError(unknownError instanceof ApiError ? unknownError.detail : String(unknownError))
+    }
   }
 
   return (
@@ -83,7 +134,7 @@ export default function ChunkSettingsPage({ document, onBack }: Props) {
       <div className="mx-6 mt-6 flex flex-1 overflow-hidden">
         <div className="flex w-full flex-col overflow-y-auto rounded-xl border border-[#e8e8e8] bg-white px-5 py-5">
           <div className="mb-4 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-700">
-            当前配置仅为预设草稿，暂未接入后端处理流程。文档处理链路接入后，这些参数将用于切分与清洗。
+            分隔符、分段大小、重叠长度及两项清洗规则会保存到当前知识库，并在下次处理文档时生效。其余标注“后续支持”的选项暂未接入。
           </div>
           {/* 基础 */}
           <Section title="基础">
@@ -184,7 +235,12 @@ export default function ChunkSettingsPage({ document, onBack }: Props) {
 
           {saved && (
             <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-              配置已暂存于当前页面，尚未提交到后端。
+              已保存到当前知识库；已入库文档需要重新处理后才会使用新配置。
+            </div>
+          )}
+          {error && (
+            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+              {error}
             </div>
           )}
         </div>
@@ -194,11 +250,12 @@ export default function ChunkSettingsPage({ document, onBack }: Props) {
       <div className="flex flex-shrink-0 items-center justify-end border-t border-[#e8e8e8] px-6 py-4">
         <button
           type="button"
-          onClick={handleSave}
+          onClick={() => void handleSave()}
+          disabled={loading}
           className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50"
         >
           <Save className="h-3.5 w-3.5" />
-          保存配置草稿
+          {loading ? "加载配置..." : "保存配置"}
         </button>
       </div>
     </section>

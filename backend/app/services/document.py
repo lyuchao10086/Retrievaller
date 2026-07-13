@@ -471,6 +471,7 @@ async def embed_document_chunks(
     kb_id: str,
     document_id: str,
     expected_embedding_dimension: int | None = None,
+    embedding_model_name: str | None = None,
     user_id: str = DEFAULT_USER_ID,
 ) -> dict[str, int | str]:
     """为文档 chunks 生成 embedding，写入 Milvus，并回写 chunks 状态。"""
@@ -492,8 +493,16 @@ async def embed_document_chunks(
         user_id,
     )
     try:
-        embeddings = embedding_service.embed_texts([chunk.content for chunk in chunks])
-        _validate_embeddings(embeddings, len(chunks), expected_embedding_dimension)
+        embeddings = embedding_service.embed_texts(
+            [chunk.content for chunk in chunks],
+            model_name=embedding_model_name,
+        )
+        _validate_embeddings(
+            embeddings,
+            len(chunks),
+            expected_embedding_dimension,
+            embedding_model_name,
+        )
         vector_service.delete_chunk_embeddings_by_document(user_id, kb_id, document_id)
         vector_ids = vector_service.insert_chunk_embeddings(chunks, embeddings)
         if len(vector_ids) != len(chunks):
@@ -785,6 +794,7 @@ def _validate_embeddings(
     embeddings: list[list[float]],
     expected_count: int,
     expected_dimension: int | None,
+    embedding_model_name: str | None = None,
 ) -> None:
     if len(embeddings) != expected_count:
         raise ValueError("Embedding service returned unexpected embedding count")
@@ -792,9 +802,15 @@ def _validate_embeddings(
         return
     for embedding in embeddings:
         if len(embedding) != expected_dimension:
+            model_context = (
+                f" for model '{embedding_model_name}'"
+                if embedding_model_name
+                else ""
+            )
             raise ValueError(
-                "Embedding dimension mismatch: "
-                f"expected {expected_dimension}, got {len(embedding)}"
+                f"Embedding dimension mismatch{model_context}: "
+                f"expected {expected_dimension}, got {len(embedding)}. "
+                "Choose a compatible embedding model or recreate the Milvus collection."
             )
 
 

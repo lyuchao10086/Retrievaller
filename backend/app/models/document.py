@@ -21,3 +21,6 @@ class Document:
     task_id: str | None
     created_at: datetime
     updated_at: datetime
+    processing_config_json: str | None = None
+    config_version: int | None = None
+    needs_reindex: bool = False

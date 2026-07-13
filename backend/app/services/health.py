@@ -70,7 +70,10 @@ async def check_milvus(settings: Settings) -> HealthStatus:
         )
         await asyncio.to_thread(utility.get_server_version, using=alias)
     finally:
-        connections.disconnect(alias)
+        try:
+            connections.disconnect(alias)
+        except Exception:
+            pass
     return {"status": "ok"}
 
 
@@ -84,33 +87,69 @@ async def check_ollama_llm(settings: Settings) -> HealthStatus:
     return await _check_ollama_model(settings, settings.local_llm_model)
 
 
+async def check_ollama_rerank(settings: Settings) -> HealthStatus:
+    """检查 OpenAI 兼容的 /v1/rerank 服务，不假设其实现 Ollama tags 接口。"""
+    if not settings.rerank_base_url.strip() or not settings.rerank_model_name.strip():
+        return {
+            "status": "warning",
+            "code": "optional_not_configured",
+            "detail": "Rerank model is not configured",
+            "hint": "Set RERANK_BASE_URL and RERANK_MODEL_NAME when rerank is enabled",
+        }
+    try:
+        payload = await _request_rerank_health(settings)
+    except Exception as exc:
+        return {
+            "status": "warning",
+            "code": "optional_dependency_unreachable",
+            "detail": f"Rerank service is unavailable ({type(exc).__name__})",
+            "hint": "Check RERANK_BASE_URL before enabling rerank",
+        }
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if isinstance(results, list):
+        return {
+            "status": "ok",
+            "code": "available",
+            "model": settings.rerank_model_name,
+            "protocol": "/v1/rerank",
+            "detail": "Rerank service is reachable and accepted the configured model",
+        }
+    return {
+        "status": "warning",
+        "code": "optional_dependency_invalid_response",
+        "model": settings.rerank_model_name,
+        "detail": "Rerank service returned an invalid response",
+        "hint": "Check the /v1/rerank protocol and configured rerank model",
+    }
+
+
 def check_deepseek_config(settings: Settings) -> HealthStatus:
     """只检查 DeepSeek 配置是否存在，不发起外部 API 调用。"""
     if settings.deepseek_api_key.strip():
         return {
             "status": "ok",
+            "code": "configured",
             "provider": "deepseek",
             "model": settings.deepseek_model,
             "detail": "DeepSeek API key is configured",
         }
     return {
         "status": "warning",
+        "code": "optional_not_configured",
         "provider": "deepseek",
         "model": settings.deepseek_model,
         "detail": "DeepSeek API key is not configured",
+        "hint": "Configure DeepSeek credentials only when QA evaluation is required",
     }
 
 
 async def check_celery_config(settings: Settings) -> HealthStatus:
     """检查 Celery broker/result backend 配置和 Redis 连通性，不依赖 worker 存活。"""
-    broker_url = _redis_url(settings, settings.redis_db)
-    backend_url = _redis_url(settings, settings.redis_result_db)
     await _ping_redis_db(settings, settings.redis_db)
     await _ping_redis_db(settings, settings.redis_result_db)
     return {
         "status": "ok",
-        "broker": broker_url,
-        "backend": backend_url,
+        "code": "configured",
         "detail": "Celery broker and result backend Redis databases are reachable",
     }
 
@@ -125,8 +164,20 @@ async def _run_check(
             _call_check(check, settings),
             timeout=settings.health_check_timeout_seconds,
         )
+    except TimeoutError:
+        return name, {
+            "status": "error",
+            "code": "dependency_timeout",
+            "detail": f"{name} health check timed out",
+            "hint": _dependency_hint(name),
+        }
     except Exception as exc:
-        return name, {"status": "error", "detail": str(exc)}
+        return name, {
+            "status": "error",
+            "code": "dependency_unreachable",
+            "detail": f"{name} health check failed ({type(exc).__name__})",
+            "hint": _dependency_hint(name),
+        }
     return name, result
 
 
@@ -139,6 +190,7 @@ async def check_dependencies_health() -> dict[str, HealthStatus]:
         "milvus": check_milvus,
         "ollama_embedding": check_ollama_embedding,
         "ollama_llm": check_ollama_llm,
+        "ollama_rerank": check_ollama_rerank,
         "deepseek_config": check_deepseek_config,
         "celery_config": check_celery_config,
     }
@@ -160,18 +212,24 @@ async def _check_ollama_model(settings: Settings, model_name: str) -> HealthStat
     if model_name in model_names:
         return {
             "status": "ok",
+            "code": "available",
             "model": model_name,
             "detail": "Ollama is reachable and model is available",
         }
     return {
         "status": "warning",
+        "code": "model_missing",
         "model": model_name,
         "detail": "Ollama is reachable but configured model was not found",
+        "hint": f"Pull the model: ollama pull {model_name}",
     }
 
 
-async def _fetch_ollama_model_names(settings: Settings) -> list[str]:
-    base_url = settings.ollama_base_url.rstrip("/")
+async def _fetch_ollama_model_names(
+    settings: Settings,
+    base_url: str | None = None,
+) -> list[str]:
+    base_url = (base_url or settings.ollama_base_url).rstrip("/")
     async with httpx.AsyncClient(timeout=settings.health_check_timeout_seconds) as client:
         response = await client.get(f"{base_url}/api/tags")
         response.raise_for_status()
@@ -191,6 +249,24 @@ async def _fetch_ollama_model_names(settings: Settings) -> list[str]:
     return model_names
 
 
+async def _request_rerank_health(settings: Settings) -> dict[str, object]:
+    base_url = settings.rerank_base_url.rstrip("/")
+    async with httpx.AsyncClient(timeout=settings.health_check_timeout_seconds) as client:
+        response = await client.post(
+            f"{base_url}/v1/rerank",
+            json={
+                "model": settings.rerank_model_name,
+                "query": "health check",
+                "documents": ["health check"],
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Rerank service returned non-object response")
+    return payload
+
+
 async def _ping_redis_db(settings: Settings, db: int) -> None:
     client = Redis(
         host=settings.redis_host,
@@ -205,5 +281,15 @@ async def _ping_redis_db(settings: Settings, db: int) -> None:
         await client.aclose()
 
 
-def _redis_url(settings: Settings, db: int) -> str:
-    return f"redis://{settings.redis_host}:{settings.redis_port}/{db}"
+def _dependency_hint(name: str) -> str:
+    hints = {
+        "mysql": "Run docker compose logs mysql and verify MYSQL_HOST/MYSQL_PORT",
+        "redis": "Run docker compose logs redis and verify REDIS_HOST/REDIS_PORT",
+        "minio": "Run docker compose logs minio and verify MINIO_ENDPOINT",
+        "milvus": "Run docker compose logs milvus and verify MILVUS_HOST/MILVUS_PORT",
+        "ollama_embedding": "Start Ollama, verify OLLAMA_BASE_URL, then run ollama pull <embedding model>",
+        "ollama_llm": "Start Ollama, verify OLLAMA_BASE_URL, then run ollama pull <LLM model>",
+        "ollama_rerank": "Start the rerank service and verify RERANK_BASE_URL exposes POST /v1/rerank",
+        "celery_config": "Verify Redis is healthy and REDIS_DB/REDIS_RESULT_DB are reachable",
+    }
+    return hints.get(name, "Check service logs and the corresponding environment variables")

@@ -25,6 +25,7 @@ import SearchModal from "./SearchModal"
 type SidebarProps = {
   active: MenuKey
   collapsed: boolean
+  username: string
   onChange: (key: MenuKey) => void
   onSelectHistory?: (record: QaRecord) => void
 }
@@ -39,7 +40,7 @@ type HistoryItem = {
 
 const HIDDEN_HISTORY_IDS_STORAGE_KEY = "retrievaller_hidden_qa_record_ids"
 
-export default function Sidebar({ active, collapsed, onChange, onSelectHistory }: SidebarProps) {
+export default function Sidebar({ active, collapsed, username, onChange, onSelectHistory }: SidebarProps) {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
   const [moreFlyoutOpen, setMoreFlyoutOpen] = useState(false)
   const [moreButtonRect, setMoreButtonRect] = useState<{ x: number; y: number; h: number } | null>(null)
@@ -388,7 +389,7 @@ export default function Sidebar({ active, collapsed, onChange, onSelectHistory }
         <div className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-100 text-blue-600">
           <UserRound className="h-4 w-4" />
         </div>
-        <span className="text-sm font-medium">用户662680</span>
+        <span className="truncate text-sm font-medium">{username}</span>
         <ChevronRight className="ml-auto h-4 w-4 text-[#aaa]" />
       </button>
 

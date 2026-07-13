@@ -39,9 +39,12 @@ async def retrieve_chunks_for_query(
     user_id: str,
     knowledge_base_id: str,
     top_k: int,
+    embedding_model_name: str | None = None,
 ) -> list[RetrievedChunk]:
     """在单个知识库沙箱中检索 query 相关 chunks，并回查来源元数据。"""
-    query_embedding = embedding_service.embed_texts([query])[0]
+    query_embedding = embedding_service.embed_texts(
+        [query], model_name=embedding_model_name
+    )[0]
     vector_hits = vector_service.search_chunk_embeddings(
         query_embedding=query_embedding,
         user_id=user_id,

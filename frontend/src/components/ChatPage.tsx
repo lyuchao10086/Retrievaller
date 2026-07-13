@@ -35,9 +35,6 @@ const DEFAULT_SUGGESTIONS = [
   "当前知识库里有哪些关键流程？"
 ]
 
-const DEFAULT_TOP_K = 5
-const TOP_K_STORAGE_KEY = "retrievaller.defaultTopK"
-
 type Message = {
   role: "user" | "assistant"
   content: string
@@ -248,8 +245,7 @@ export default function ChatPage({ sidebarCollapsed, onToggleSidebar, selectedQa
       const response = await answerQuestionAcrossKnowledgeBases(
         {
           query: trimmed,
-          knowledge_base_ids: selectedKbIds,
-          top_k: readDefaultTopK()
+          knowledge_base_ids: selectedKbIds
         },
         controller.signal
       )
@@ -750,15 +746,6 @@ function formatDocumentSource(source: MultiRagSource["source"]) {
   return [source.file_name, source.chapter, source.section, source.subsection]
     .filter(Boolean)
     .join(" - ")
-}
-
-function readDefaultTopK() {
-  return clampTopK(Number(window.localStorage.getItem(TOP_K_STORAGE_KEY)))
-}
-
-function clampTopK(value: number) {
-  if (Number.isNaN(value)) return DEFAULT_TOP_K
-  return Math.min(20, Math.max(1, value))
 }
 
 function readErrorMessage(unknownError: unknown) {

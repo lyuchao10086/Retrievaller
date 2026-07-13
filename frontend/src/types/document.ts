@@ -25,6 +25,9 @@ export type DocumentRecord = {
   parsed_bucket?: string | null
   parsed_object_key?: string | null
   task_id?: string | null
+  processing_config_json?: string | null
+  config_version?: number | null
+  needs_reindex?: boolean
   created_at: string
   updated_at: string
 }

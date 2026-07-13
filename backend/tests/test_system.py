@@ -18,6 +18,8 @@ def test_system_config_returns_safe_runtime_settings_without_secrets():
         ".md",
         ".markdown",
     ]
-    assert payload["rerank"]["enabled"] is False
+    assert "configured" in payload["rerank"]
+    assert "model_name" in payload["rerank"]
+    assert "base_url" not in payload["rerank"]
     assert "deepseek_api_key" not in str(payload).lower()
     assert "minio_secret_key" not in str(payload).lower()

@@ -13,6 +13,8 @@ from app.services.document import KnowledgeBaseNotFoundError
 from app.services.embedding_service import EmbeddingService
 from app.services.knowledge_base import DEFAULT_USER_ID
 from app.services.local_llm_service import LocalLLMService
+from app.models.knowledge_base_config import KnowledgeBaseConfig
+from app.services.rerank_service import HttpRerankService
 from app.services.retrieval_service import (
     retrieve_chunks_for_query,
     retrieve_chunks_for_query_in_knowledge_bases,
@@ -55,6 +57,16 @@ class InvalidKnowledgeBasesError(ValueError):
         self.invalid_knowledge_base_ids = invalid_knowledge_base_ids
 
 
+class IncompatibleKnowledgeBaseGenerationConfigError(ValueError):
+    """多知识库请求不能在不确定的生成参数下执行。"""
+
+
+MULTI_KB_GENERATION_CONFIG_MISMATCH_MESSAGE = (
+    "Selected knowledge bases use different generation settings. "
+    "Select one knowledge base or align their LLM configuration."
+)
+
+
 async def answer_single_knowledge_base_question(
     knowledge_base_repository: KnowledgeBaseRepository,
     document_repository: DocumentRepository,
@@ -66,6 +78,8 @@ async def answer_single_knowledge_base_question(
     query: str,
     top_k: int,
     user_id: str = DEFAULT_USER_ID,
+    config: KnowledgeBaseConfig | None = None,
+    rerank_service: HttpRerankService | None = None,
 ) -> RagAnswerResponse:
     """单知识库 RAG：检索当前知识库 chunks，再调用本地大模型总结答案。"""
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
@@ -88,6 +102,12 @@ async def answer_single_knowledge_base_question(
             sources=[],
         )
 
+    effective_top_k = config.retrieval.top_k if config is not None else top_k
+    candidate_count = (
+        config.retrieval.rerank_candidate_count
+        if config is not None and config.retrieval.rerank_enabled
+        else effective_top_k
+    )
     retrieved_chunks = await retrieve_chunks_for_query(
         embedding_service=embedding_service,
         vector_service=vector_service,
@@ -96,7 +116,13 @@ async def answer_single_knowledge_base_question(
         query=query,
         user_id=user_id,
         knowledge_base_id=kb_id,
-        top_k=top_k,
+        top_k=candidate_count,
+        embedding_model_name=(
+            config.processing.embedding_model_name if config is not None else None
+        ),
+    )
+    retrieved_chunks = await _apply_retrieval_config(
+        query, retrieved_chunks, config, rerank_service
     )
 
     sources = [
@@ -130,7 +156,7 @@ async def answer_single_knowledge_base_question(
     return RagAnswerResponse(
         query=query,
         knowledge_base_id=kb_id,
-        top_k=top_k,
+        top_k=effective_top_k,
         answer=answer,
         sources=sources,
     )
@@ -147,6 +173,8 @@ async def answer_multi_knowledge_base_question(
     query: str,
     top_k: int,
     user_id: str = DEFAULT_USER_ID,
+    configs: dict[str, KnowledgeBaseConfig] | None = None,
+    rerank_service: HttpRerankService | None = None,
 ) -> MultiKnowledgeBaseRagAnswerResponse:
     """多知识库 RAG：只在用户选择的知识库范围内检索并生成答案。"""
     knowledge_bases = await knowledge_base_repository.list_active_by_ids_and_user(
@@ -157,6 +185,8 @@ async def answer_multi_knowledge_base_question(
     invalid_ids = [kb_id for kb_id in knowledge_base_ids if kb_id not in found_ids]
     if invalid_ids:
         raise InvalidKnowledgeBasesError(invalid_ids)
+
+    _ensure_compatible_generation_configs(knowledge_base_ids, configs)
 
     has_embedded_chunks = (
         await chunk_repository.exists_embedded_by_knowledge_base_ids(
@@ -173,17 +203,43 @@ async def answer_multi_knowledge_base_question(
             sources=[],
         )
 
-    retrieved_chunks = await retrieve_chunks_for_query_in_knowledge_bases(
-        embedding_service=embedding_service,
-        vector_service=vector_service,
-        chunk_repository=chunk_repository,
-        document_repository=document_repository,
-        knowledge_base_repository=knowledge_base_repository,
-        query=query,
-        user_id=user_id,
-        knowledge_base_ids=knowledge_base_ids,
-        top_k=top_k,
-    )
+    if configs is None:
+        retrieved_chunks = await retrieve_chunks_for_query_in_knowledge_bases(
+            embedding_service=embedding_service,
+            vector_service=vector_service,
+            chunk_repository=chunk_repository,
+            document_repository=document_repository,
+            knowledge_base_repository=knowledge_base_repository,
+            query=query,
+            user_id=user_id,
+            knowledge_base_ids=knowledge_base_ids,
+            top_k=top_k,
+        )
+    else:
+        retrieved_chunks = []
+        for knowledge_base_id in knowledge_base_ids:
+            config = configs[knowledge_base_id]
+            candidate_count = (
+                config.retrieval.rerank_candidate_count
+                if config.retrieval.rerank_enabled
+                else config.retrieval.top_k
+            )
+            per_knowledge_base = await retrieve_chunks_for_query(
+                embedding_service=embedding_service,
+                vector_service=vector_service,
+                chunk_repository=chunk_repository,
+                document_repository=document_repository,
+                query=query,
+                user_id=user_id,
+                knowledge_base_id=knowledge_base_id,
+                top_k=candidate_count,
+                embedding_model_name=config.processing.embedding_model_name,
+            )
+            retrieved_chunks.extend(
+                await _apply_retrieval_config(
+                    query, per_knowledge_base, config, rerank_service
+                )
+            )
 
     sources = [
         MultiKnowledgeBaseRagSource(
@@ -212,9 +268,13 @@ async def answer_multi_knowledge_base_question(
             sources=[],
         )
 
+    primary_config = configs[knowledge_base_ids[0]] if configs else None
     answer = await llm_service.generate_answer(
         system_prompt=MULTI_KB_SYSTEM_PROMPT,
         user_prompt=_build_multi_kb_user_prompt(query, sources),
+        model_name=(primary_config.generation.llm_model_name if primary_config else None),
+        temperature=(primary_config.generation.temperature if primary_config else None),
+        max_tokens=(primary_config.generation.max_tokens if primary_config else None),
     )
     return MultiKnowledgeBaseRagAnswerResponse(
         query=query,
@@ -223,6 +283,52 @@ async def answer_multi_knowledge_base_question(
         answer=answer,
         sources=sources,
     )
+
+
+def _ensure_compatible_generation_configs(
+    knowledge_base_ids: list[str],
+    configs: dict[str, KnowledgeBaseConfig] | None,
+) -> None:
+    """Reject ambiguous multi-KB generation requests before retrieval begins."""
+    if configs is None or len(knowledge_base_ids) < 2:
+        return
+
+    reference_generation = configs[knowledge_base_ids[0]].generation_dict()
+    if any(
+        configs[knowledge_base_id].generation_dict() != reference_generation
+        for knowledge_base_id in knowledge_base_ids[1:]
+    ):
+        raise IncompatibleKnowledgeBaseGenerationConfigError(
+            MULTI_KB_GENERATION_CONFIG_MISMATCH_MESSAGE
+        )
+
+
+async def _apply_retrieval_config(
+    query: str,
+    chunks,
+    config: KnowledgeBaseConfig | None,
+    rerank_service: HttpRerankService | None,
+):
+    if config is None:
+        return chunks
+    filtered = [
+        chunk for chunk in chunks if chunk.score >= config.retrieval.similarity_threshold
+    ]
+    if config.retrieval.rerank_enabled:
+        if rerank_service is None:
+            raise RuntimeError("Rerank is enabled but unavailable")
+        ranking = await rerank_service.rerank(
+            query,
+            [chunk.content for chunk in filtered],
+            config.retrieval.rerank_model_name,
+        )
+        reranked = []
+        for result in ranking:
+            chunk = filtered[result.index]
+            chunk.score = result.score
+            reranked.append(chunk)
+        filtered = reranked
+    return filtered[: config.retrieval.top_k]
 
 
 def _build_user_prompt(query: str, sources: list[RagSource]) -> str:

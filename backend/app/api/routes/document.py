@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import logging
 from typing import Annotated, Protocol
 
 import aiomysql
@@ -7,14 +8,18 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from minio import Minio
 from pydantic import BaseModel, ValidationError
 
+from app.api.dependencies.auth import CurrentUser, get_current_user
 from app.core.config import Settings, get_settings
 from app.core.database import get_db_connection
+from app.core.logging import bind_log_context
 from app.repositories.chunk import ChunkRepository, MySQLChunkRepository
 from app.repositories.document import DocumentRepository, MySQLDocumentRepository
 from app.repositories.knowledge_base import (
     KnowledgeBaseRepository,
     MySQLKnowledgeBaseRepository,
 )
+from app.repositories.knowledge_base_config import KnowledgeBaseConfigRepository
+from app.api.routes.knowledge_base import get_knowledge_base_config_repository
 from app.schemas.document import (
     ChunkSettingsRequest,
     ChunkResponse,
@@ -46,15 +51,17 @@ from app.services.document import (
 )
 from app.services.document_storage import DocumentStorage, MinIODocumentStorage
 from app.services.embedding_service import EmbeddingService, OllamaEmbeddingService
-from app.services.knowledge_base import DEFAULT_USER_ID
 from app.services.vector_service import MilvusVectorService, VectorService
+from app.services.knowledge_base_config import get_or_create_knowledge_base_config
 from app.tasks.document_processing import process_document_task
 
 
 router = APIRouter(
     prefix="/api/knowledge-bases/{kb_id}/documents",
     tags=["documents"],
+    dependencies=[Depends(get_current_user)],
 )
+logger = logging.getLogger(__name__)
 
 
 class ProcessingQueue(Protocol):
@@ -147,9 +154,11 @@ async def upload_document_api(
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
     chunk_settings: Annotated[str | None, Form()] = None,
 ) -> DocumentResponse:
     """上传原始文件；处理由 /process 接口显式提交后台任务。"""
+    _parse_chunk_settings_form(chunk_settings)
     content = await file.read()
     file_name = file.filename or "uploaded_file"
     file_type = file.content_type
@@ -161,6 +170,7 @@ async def upload_document_api(
         file_name=file_name,
         file_type=file_type,
         content=content,
+        user_id=current_user.id,
         bucket_name=settings.minio_bucket_documents,
     )
     if document is None:
@@ -168,7 +178,6 @@ async def upload_document_api(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Knowledge base not found",
         )
-    _parse_chunk_settings_form(chunk_settings)
     return DocumentResponse.model_validate(document)
 
 
@@ -179,9 +188,10 @@ async def list_documents_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[DocumentResponse]:
     """列出指定知识库沙箱下的文档记录。"""
-    documents = await list_documents_by_knowledge_base(document_repository, kb_id)
+    documents = await list_documents_by_knowledge_base(document_repository, kb_id, current_user.id)
     return [DocumentResponse.model_validate(document) for document in documents]
 
 
@@ -193,9 +203,10 @@ async def get_document_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> DocumentResponse:
     """查询指定知识库下的单个文档元数据。"""
-    document = await get_document_by_id(document_repository, kb_id, document_id)
+    document = await get_document_by_id(document_repository, kb_id, document_id, current_user.id)
     if document is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -218,15 +229,17 @@ async def parse_document_api(
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
     settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> ParseTaskResponse:
     """同步解析 txt/markdown 文档，并保存解析 JSON。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
     try:
         await parse_document_to_storage(
             document_repository=document_repository,
             storage=storage,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=current_user.id,
             parsed_bucket_name=settings.minio_bucket_parsed_results,
         )
     except DocumentNotFoundError as exc:
@@ -260,12 +273,19 @@ async def process_document_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    config_repository: Annotated[
+        KnowledgeBaseConfigRepository,
+        Depends(get_knowledge_base_config_repository),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
     processing_queue: Annotated[ProcessingQueue, Depends(get_processing_queue)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
     body: Annotated[ChunkSettingsRequest | None, Body()] = None,
 ) -> ParseTaskResponse:
     """把支持的文本类文档重新提交到 Celery 处理队列。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
-    document = await get_document_by_id(document_repository, kb_id, document_id)
+    bind_log_context(knowledge_base_id=kb_id, document_id=document_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
+    document = await get_document_by_id(document_repository, kb_id, document_id, current_user.id)
     if document is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -287,8 +307,29 @@ async def process_document_api(
             detail="Document is already processing",
         )
 
+    config = await get_or_create_knowledge_base_config(
+        config_repository, kb_id, current_user.id, settings
+    )
+    processing_snapshot = config.processing_dict()
+    if body is not None:
+        processing_snapshot.update(body.model_dump(exclude_none=True))
+    if processing_snapshot["chunk_overlap"] >= processing_snapshot["chunk_size"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="chunk_overlap must be less than chunk_size",
+        )
+    saved_snapshot = await document_repository.set_processing_config_by_id_and_knowledge_base(
+        current_user.id,
+        kb_id,
+        document_id,
+        json.dumps(processing_snapshot, ensure_ascii=False),
+        config.version,
+        _utc_now(),
+    )
+    if saved_snapshot is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document is not available for processing")
     queued_status_document = await document_repository.update_status_by_id_and_knowledge_base(
-        DEFAULT_USER_ID,
+        current_user.id,
         kb_id,
         document_id,
         "parsing",
@@ -301,12 +342,16 @@ async def process_document_api(
             detail="Document is not available for processing",
         )
 
-    chunk_settings = body.model_dump() if body is not None else None
+    chunk_settings = processing_snapshot
     try:
-        task = processing_queue.delay(DEFAULT_USER_ID, kb_id, document_id, chunk_settings)
+        task = processing_queue.delay(current_user.id, kb_id, document_id, chunk_settings)
     except Exception as exc:
+        logger.exception(
+            "document_processing_queue_unavailable",
+            extra={"error_code": "celery_queue_unavailable"},
+        )
         await document_repository.update_status_by_id_and_knowledge_base(
-            DEFAULT_USER_ID,
+            current_user.id,
             kb_id,
             document_id,
             FAILED_STATUS,
@@ -318,12 +363,14 @@ async def process_document_api(
             detail="Document processing queue is unavailable",
         ) from exc
     queued_document = await document_repository.set_task_id_by_id_and_knowledge_base(
-        DEFAULT_USER_ID,
+        current_user.id,
         kb_id,
         document_id,
         task.id,
         _utc_now(),
     )
+    bind_log_context(task_id=task.id)
+    logger.info("document_processing_queued")
     return ParseTaskResponse(
         message="Document processing queued",
         document_id=document_id,
@@ -345,15 +392,17 @@ async def get_parsed_document_api(
         Depends(get_document_repository),
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> ParsedDocumentResponse:
     """读取指定文档的解析结果。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
     try:
         payload = await get_parsed_document_payload(
             document_repository,
             storage,
             kb_id,
             document_id,
+            current_user.id,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -389,9 +438,19 @@ async def create_chunks_api(
         VectorService,
         Depends(get_vector_service),
     ],
+    config_repository: Annotated[
+        KnowledgeBaseConfigRepository,
+        Depends(get_knowledge_base_config_repository),
+    ],
+    settings: Annotated[Settings, Depends(get_settings)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[ChunkResponse]:
     """基于原始文本或解析结果同步生成 chunks，默认 500 字符、50 overlap。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    bind_log_context(knowledge_base_id=kb_id, document_id=document_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
+    config = await get_or_create_knowledge_base_config(
+        config_repository, kb_id, current_user.id, settings
+    )
     try:
         chunks = await create_document_chunks(
             document_repository=document_repository,
@@ -400,6 +459,8 @@ async def create_chunks_api(
             vector_service=vector_service,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=current_user.id,
+            **_processing_chunk_kwargs(config.processing_dict()),
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -422,6 +483,10 @@ async def create_chunks_api(
             detail=str(exc),
         ) from exc
     except Exception as exc:
+        logger.exception(
+            "document_chunking_failed",
+            extra={"error_code": "document_chunking_failed"},
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Document chunking failed",
@@ -445,15 +510,17 @@ async def list_chunks_api(
         ChunkRepository,
         Depends(get_chunk_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> list[ChunkResponse]:
     """列出指定文档的 chunks。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
     try:
         chunks = await list_document_chunks(
             document_repository,
             chunk_repository,
             kb_id,
             document_id,
+            current_user.id,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -488,9 +555,18 @@ async def embed_document_api(
         Depends(get_vector_service),
     ],
     settings: Annotated[Settings, Depends(get_settings)],
+    config_repository: Annotated[
+        KnowledgeBaseConfigRepository,
+        Depends(get_knowledge_base_config_repository),
+    ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> EmbeddingStatusResponse:
     """同步生成 chunks embedding 并写入 Milvus。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    bind_log_context(knowledge_base_id=kb_id, document_id=document_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
+    config = await get_or_create_knowledge_base_config(
+        config_repository, kb_id, current_user.id, settings
+    )
     try:
         payload = await embed_document_chunks(
             document_repository=document_repository,
@@ -500,6 +576,8 @@ async def embed_document_api(
             kb_id=kb_id,
             document_id=document_id,
             expected_embedding_dimension=settings.embedding_dimension,
+            embedding_model_name=config.processing.embedding_model_name,
+            user_id=current_user.id,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -512,6 +590,10 @@ async def embed_document_api(
             detail=str(exc),
         ) from exc
     except Exception as exc:
+        logger.exception(
+            "document_embedding_failed",
+            extra={"error_code": "document_embedding_failed"},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Document embedding failed",
@@ -535,15 +617,17 @@ async def get_embedding_status_api(
         ChunkRepository,
         Depends(get_chunk_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> EmbeddingStatusResponse:
     """返回文档 chunks 的 embedding 进度。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
     try:
         payload = await get_document_embedding_status(
             document_repository=document_repository,
             chunk_repository=chunk_repository,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=current_user.id,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -569,15 +653,17 @@ async def get_processing_status_api(
         ChunkRepository,
         Depends(get_chunk_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> ProcessingStatusResponse:
     """返回文档后台处理进度，包含 Celery task_id、错误和 chunk 统计。"""
-    await _ensure_knowledge_base(knowledge_base_repository, kb_id)
+    await _ensure_knowledge_base(knowledge_base_repository, kb_id, current_user.id)
     try:
         payload = await get_document_processing_status(
             document_repository=document_repository,
             chunk_repository=chunk_repository,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=current_user.id,
         )
     except DocumentNotFoundError as exc:
         raise HTTPException(
@@ -608,11 +694,12 @@ async def delete_document_api(
         Depends(get_vector_service),
     ],
     storage: Annotated[DocumentStorage, Depends(get_document_storage)],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> DocumentResponse:
     """按可重试顺序清理文档索引和对象，并保留 deleted 生命周期终态。"""
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
         kb_id,
-        DEFAULT_USER_ID,
+        current_user.id,
     )
     if knowledge_base is None:
         raise HTTPException(
@@ -620,7 +707,7 @@ async def delete_document_api(
             detail="Knowledge base not found",
         )
 
-    document = await get_document_by_id(document_repository, kb_id, document_id)
+    document = await get_document_by_id(document_repository, kb_id, document_id, current_user.id)
     if document is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -635,6 +722,7 @@ async def delete_document_api(
             vector_service=vector_service,
             kb_id=kb_id,
             document_id=document_id,
+            user_id=current_user.id,
         )
     except Exception as exc:
         raise HTTPException(
@@ -647,10 +735,11 @@ async def delete_document_api(
 async def _ensure_knowledge_base(
     knowledge_base_repository: KnowledgeBaseRepository,
     kb_id: str,
+    user_id: str,
 ) -> None:
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
         kb_id,
-        DEFAULT_USER_ID,
+        user_id,
     )
     if knowledge_base is None:
         raise HTTPException(
@@ -661,6 +750,21 @@ async def _ensure_knowledge_base(
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _processing_chunk_kwargs(processing_config: dict[str, object]) -> dict[str, object]:
+    supported_keys = {
+        "separator",
+        "chunk_size",
+        "chunk_overlap",
+        "replace_consecutive_whitespace",
+        "remove_urls_and_emails",
+    }
+    return {
+        key: value
+        for key, value in processing_config.items()
+        if key in supported_keys
+    }
 
 
 def _parse_chunk_settings_form(
@@ -697,11 +801,12 @@ async def rename_document_api(
         DocumentRepository,
         Depends(get_document_repository),
     ],
+    current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> DocumentResponse:
     """重命名指定知识库下的文档文件名。"""
     knowledge_base = await knowledge_base_repository.get_active_by_id_and_user(
         kb_id,
-        DEFAULT_USER_ID,
+        current_user.id,
     )
     if knowledge_base is None:
         raise HTTPException(
@@ -714,6 +819,7 @@ async def rename_document_api(
         kb_id,
         document_id,
         body.file_name,
+        current_user.id,
     )
     if document is None:
         raise HTTPException(

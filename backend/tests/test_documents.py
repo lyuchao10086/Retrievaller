@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
@@ -13,10 +14,12 @@ from app.api.routes.document import (
     get_processing_queue,
     get_vector_service,
 )
+from app.api.routes.knowledge_base import get_knowledge_base_config_repository
 from app.main import app
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.models.knowledge_base import KnowledgeBase
+from app.models.knowledge_base_config import KnowledgeBaseConfig, ProcessingConfig
 from app.repositories.chunk import MySQLChunkRepository
 from app.services.document import (
     DEFAULT_DOCUMENT_BUCKET,
@@ -36,6 +39,7 @@ from app.services.document import (
 )
 from app.services.embedding_service import OllamaEmbeddingService
 from app.services.knowledge_base import DEFAULT_USER_ID
+from app.tasks import document_processing
 from app.tasks.document_processing import _chunk_settings_kwargs, _normalize_task_args
 
 
@@ -138,6 +142,25 @@ class InMemoryDocumentRepository:
         if document is None:
             return None
         document.task_id = task_id
+        document.updated_at = updated_at
+        return document
+
+    async def set_processing_config_by_id_and_knowledge_base(
+        self,
+        user_id,
+        knowledge_base_id,
+        document_id,
+        processing_config_json,
+        config_version,
+        updated_at,
+    ):
+        document = await self.get_by_id_and_knowledge_base(
+            user_id, knowledge_base_id, document_id
+        )
+        if document is None:
+            return None
+        document.processing_config_json = processing_config_json
+        document.config_version = config_version
         document.updated_at = updated_at
         return document
 
@@ -292,9 +315,11 @@ class FakeEmbeddingService:
     def __init__(self, dimension=3):
         self.dimension = dimension
         self.texts = []
+        self.model_names = []
 
-    def embed_texts(self, texts):
+    def embed_texts(self, texts, model_name=None):
         self.texts.extend(texts)
+        self.model_names.append(model_name)
         return [[float(index + 1)] * self.dimension for index, _ in enumerate(texts)]
 
 
@@ -350,6 +375,27 @@ class FakeProcessingQueue:
 class FailingProcessingQueue:
     def delay(self, user_id, kb_id, document_id, chunk_settings=None):
         raise RuntimeError("Celery unavailable")
+
+
+class InMemoryKnowledgeBaseConfigRepository:
+    def __init__(self, config):
+        self.config = config
+
+    async def get_by_knowledge_base_and_user(self, knowledge_base_id, user_id):
+        if (
+            self.config.knowledge_base_id == knowledge_base_id
+            and self.config.user_id == user_id
+        ):
+            return self.config
+        return None
+
+    async def insert(self, config):
+        self.config = config
+        return config
+
+    async def update(self, config):
+        self.config = config
+        return config
 
 
 class InMemoryDocumentStorage:
@@ -890,6 +936,305 @@ def test_embed_document_chunks_writes_vectors_and_embedding_status():
     assert document.status == "embedded"
 
 
+def test_embed_document_chunks_reports_model_name_for_dimension_mismatch():
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    embedding_service = FakeEmbeddingService(dimension=3)
+    vector_service = FakeVectorService()
+    document = make_document("doc_dimension", "kb_target", DEFAULT_USER_ID)
+    document.status = "chunked"
+    document_repository.items.append(document)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    chunk_repository.items.append(
+        make_chunk("chunk_dimension", document, 0, "chunked", None, now)
+    )
+
+    try:
+        run_async(
+            embed_document_chunks(
+                document_repository=document_repository,
+                chunk_repository=chunk_repository,
+                embedding_service=embedding_service,
+                vector_service=vector_service,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+                expected_embedding_dimension=4,
+                embedding_model_name="embed-incompatible",
+            )
+        )
+    except ValueError as exc:
+        error_message = str(exc)
+    else:
+        raise AssertionError("Expected an embedding dimension mismatch")
+
+    assert "embed-incompatible" in error_message
+    assert "expected 4" in error_message
+    assert "got 3" in error_message
+    assert vector_service.calls == []
+    assert document.status == "failed"
+
+
+def test_document_lifecycle_keeps_processing_config_isolated_and_cleans_deleted_index():
+    knowledge_base_one = make_knowledge_base("kb_one")
+    knowledge_base_two = make_knowledge_base("kb_two")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository(
+        [knowledge_base_one, knowledge_base_two]
+    )
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    embedding_service = FakeEmbeddingService(dimension=3)
+    vector_service = FakeVectorService()
+    first_config = ProcessingConfig(
+        separator="\\n\\n",
+        chunk_size=100,
+        chunk_overlap=0,
+        replace_consecutive_whitespace=True,
+        remove_urls_and_emails=True,
+        embedding_model_name="embed-first",
+    )
+    second_config = ProcessingConfig(
+        separator="\\n\\n",
+        chunk_size=100,
+        chunk_overlap=0,
+        replace_consecutive_whitespace=False,
+        remove_urls_and_emails=False,
+        embedding_model_name="embed-second",
+    )
+
+    first_document = run_async(
+        upload_document_to_knowledge_base(
+            knowledge_base_repository=knowledge_base_repository,
+            document_repository=document_repository,
+            storage=storage,
+            kb_id=knowledge_base_one.id,
+            file_name="first.txt",
+            file_type="text/plain",
+            content=(
+                b"alpha   https://example.test/path beta"
+                + bytes([10, 10])
+                + b"second line"
+            ),
+        )
+    )
+    second_document = run_async(
+        upload_document_to_knowledge_base(
+            knowledge_base_repository=knowledge_base_repository,
+            document_repository=document_repository,
+            storage=storage,
+            kb_id=knowledge_base_two.id,
+            file_name="second.txt",
+            file_type="text/plain",
+            content=(
+                b"alpha   https://example.test/path beta"
+                + bytes([10, 10])
+                + b"second line"
+            ),
+        )
+    )
+
+    assert first_document is not None
+    assert second_document is not None
+
+    for document, config in (
+        (first_document, first_config),
+        (second_document, second_config),
+    ):
+        run_async(
+            parse_document_to_storage(
+                document_repository=document_repository,
+                storage=storage,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+            )
+        )
+        run_async(
+            create_document_chunks(
+                document_repository=document_repository,
+                chunk_repository=chunk_repository,
+                storage=storage,
+                vector_service=vector_service,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+                separator=config.separator,
+                chunk_size=config.chunk_size,
+                chunk_overlap=config.chunk_overlap,
+                replace_consecutive_whitespace=config.replace_consecutive_whitespace,
+                remove_urls_and_emails=config.remove_urls_and_emails,
+            )
+        )
+        run_async(
+            embed_document_chunks(
+                document_repository=document_repository,
+                chunk_repository=chunk_repository,
+                embedding_service=embedding_service,
+                vector_service=vector_service,
+                kb_id=document.knowledge_base_id,
+                document_id=document.id,
+                expected_embedding_dimension=3,
+                embedding_model_name=config.embedding_model_name,
+            )
+        )
+
+    first_chunks = run_async(
+        chunk_repository.list_by_document(
+            DEFAULT_USER_ID, knowledge_base_one.id, first_document.id
+        )
+    )
+    second_chunks = run_async(
+        chunk_repository.list_by_document(
+            DEFAULT_USER_ID, knowledge_base_two.id, second_document.id
+        )
+    )
+    assert [chunk.content for chunk in first_chunks] == ["alpha beta", "second line"]
+    assert [chunk.content for chunk in second_chunks] == [
+        "alpha   https://example.test/path beta",
+        "second line",
+    ]
+    assert embedding_service.model_names == ["embed-first", "embed-second"]
+    assert first_document.status == "embedded"
+    assert second_document.status == "embedded"
+
+    deleted = run_async(
+        delete_document_with_cleanup(
+            document_repository=document_repository,
+            chunk_repository=chunk_repository,
+            storage=storage,
+            vector_service=vector_service,
+            kb_id=knowledge_base_one.id,
+            document_id=first_document.id,
+        )
+    )
+
+    assert deleted.status == DELETED_STATUS
+    assert run_async(
+        get_document_by_id(
+            document_repository,
+            knowledge_base_one.id,
+            first_document.id,
+        )
+    ) is None
+    assert run_async(
+        chunk_repository.list_by_document(
+            DEFAULT_USER_ID, knowledge_base_one.id, first_document.id
+        )
+    ) == []
+    assert all(first_document.id not in key for _, key in storage.objects)
+    assert vector_service.deleted_documents[-1] == {
+        "user_id": DEFAULT_USER_ID,
+        "knowledge_base_id": knowledge_base_one.id,
+        "document_id": first_document.id,
+    }
+    assert run_async(
+        chunk_repository.list_by_document(
+            DEFAULT_USER_ID, knowledge_base_two.id, second_document.id
+        )
+    ) == second_chunks
+
+
+def test_async_document_task_uses_the_persisted_processing_snapshot(monkeypatch):
+    calls = []
+
+    class FakePool:
+        def acquire(self):
+            return self
+
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+    async def fake_init_database():
+        calls.append("database_initialized")
+
+    async def fake_get_database_pool():
+        return FakePool()
+
+    async def fake_parse_document_to_storage(**kwargs):
+        calls.append(("parse", kwargs["document_id"]))
+
+    async def fake_create_document_chunks(**kwargs):
+        calls.append(
+            (
+                "chunks",
+                kwargs["chunk_size"],
+                kwargs["chunk_overlap"],
+                kwargs["replace_consecutive_whitespace"],
+            )
+        )
+
+    async def fake_embed_document_chunks(**kwargs):
+        calls.append(
+            (
+                "embed",
+                kwargs["embedding_model_name"],
+                kwargs["expected_embedding_dimension"],
+            )
+        )
+
+    settings = SimpleNamespace(
+        minio_endpoint="minio.test:9000",
+        minio_access_key="access",
+        minio_secret_key="secret",
+        minio_secure=False,
+        ollama_base_url="http://ollama.test",
+        milvus_host="milvus.test",
+        milvus_port=19530,
+        milvus_collection_document_chunks="chunks",
+        embedding_dimension=3,
+        embedding_model_name="embed-default",
+        minio_bucket_parsed_results="parsed-results",
+    )
+    monkeypatch.setattr(document_processing, "get_settings", lambda: settings)
+    monkeypatch.setattr(document_processing, "init_database", fake_init_database)
+    monkeypatch.setattr(document_processing, "get_database_pool", fake_get_database_pool)
+    monkeypatch.setattr(document_processing, "MySQLDocumentRepository", lambda _: object())
+    monkeypatch.setattr(document_processing, "MySQLChunkRepository", lambda _: object())
+    monkeypatch.setattr(document_processing, "Minio", lambda **_: object())
+    monkeypatch.setattr(document_processing, "MinIODocumentStorage", lambda _: object())
+    monkeypatch.setattr(document_processing, "OllamaEmbeddingService", lambda **_: object())
+    monkeypatch.setattr(document_processing, "MilvusVectorService", lambda **_: object())
+    monkeypatch.setattr(
+        document_processing, "parse_document_to_storage", fake_parse_document_to_storage
+    )
+    monkeypatch.setattr(
+        document_processing, "create_document_chunks", fake_create_document_chunks
+    )
+    monkeypatch.setattr(
+        document_processing, "embed_document_chunks", fake_embed_document_chunks
+    )
+
+    result = run_async(
+        document_processing._process_document(
+            DEFAULT_USER_ID,
+            "kb_target",
+            "doc_target",
+            {
+                "separator": "\\n\\n",
+                "chunk_size": 300,
+                "chunk_overlap": 30,
+                "replace_consecutive_whitespace": True,
+                "remove_urls_and_emails": False,
+                "embedding_model_name": "embed-snapshot",
+            },
+        )
+    )
+
+    assert result == {
+        "user_id": DEFAULT_USER_ID,
+        "kb_id": "kb_target",
+        "document_id": "doc_target",
+        "status": "embedded",
+    }
+    assert calls == [
+        "database_initialized",
+        ("parse", "doc_target"),
+        ("chunks", 300, 30, True),
+        ("embed", "embed-snapshot", 3),
+    ]
+
+
 def test_get_document_embedding_status_counts_pending_chunks():
     document_repository = InMemoryDocumentRepository()
     chunk_repository = InMemoryChunkRepository()
@@ -1119,6 +1464,32 @@ def test_document_upload_api_accepts_chunk_settings_without_enqueueing():
     assert processing_queue.calls == []
 
 
+def test_document_upload_rejects_invalid_chunk_settings_before_persisting_file():
+    knowledge_base = make_knowledge_base("kb_active")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    storage = InMemoryDocumentStorage()
+
+    app.dependency_overrides[get_knowledge_base_repository] = (
+        lambda: knowledge_base_repository
+    )
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_document_storage] = lambda: storage
+    try:
+        response = TestClient(app).post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/upload",
+            data={"chunk_settings": "not-json"},
+            files={"file": ("demo.txt", b"hello", "text/plain")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid chunk_settings"}
+    assert document_repository.items == []
+    assert storage.objects == {}
+
+
 def test_document_process_api_enqueues_supported_document_for_retry():
     knowledge_base = make_knowledge_base("kb_active")
     knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
@@ -1158,7 +1529,14 @@ def test_document_process_api_enqueues_supported_document_for_retry():
             "user_id": DEFAULT_USER_ID,
             "kb_id": knowledge_base.id,
             "document_id": document.id,
-            "chunk_settings": None,
+                "chunk_settings": {
+                    "separator": "\\n\\n",
+                    "chunk_size": 500,
+                    "chunk_overlap": 50,
+                    "replace_consecutive_whitespace": False,
+                    "remove_urls_and_emails": False,
+                    "embedding_model_name": "quentinz/bge-large-zh-v1.5:latest",
+                },
         }
     ]
 
@@ -1184,9 +1562,9 @@ def test_document_process_api_passes_chunk_settings_to_queue():
                 "separator": "\\n\\n",
                 "chunk_size": 6,
                 "chunk_overlap": 2,
-                "replace_consecutive_whitespace": True,
-                "remove_urls_and_emails": True,
-            },
+                    "replace_consecutive_whitespace": True,
+                    "remove_urls_and_emails": True,
+                },
         )
     finally:
         app.dependency_overrides.clear()
@@ -1203,6 +1581,7 @@ def test_document_process_api_passes_chunk_settings_to_queue():
                 "chunk_overlap": 2,
                 "replace_consecutive_whitespace": True,
                 "remove_urls_and_emails": True,
+                "embedding_model_name": "quentinz/bge-large-zh-v1.5:latest",
             },
         }
     ]
@@ -1704,6 +2083,60 @@ def test_document_processing_api_can_chunk_uploaded_text_without_parse_step():
     assert status_response.status_code == 200
     assert status_response.json() == embed_response.json()
     assert document.status == "embedded"
+
+
+def test_create_chunks_api_uses_knowledge_base_processing_config():
+    knowledge_base = make_knowledge_base("kb_configured")
+    knowledge_base_repository = InMemoryKnowledgeBaseRepository([knowledge_base])
+    document_repository = InMemoryDocumentRepository()
+    chunk_repository = InMemoryChunkRepository()
+    storage = InMemoryDocumentStorage()
+    vector_service = FakeVectorService()
+    document = make_document("doc_configured", knowledge_base.id, DEFAULT_USER_ID)
+    document.file_name = "configured.txt"
+    document.file_type = "text/plain"
+    storage.objects[(document.storage_bucket, document.storage_object_key)] = {
+        "data": b"first   part https://example.test/path\n\nsecond\tpart",
+        "content_type": document.file_type,
+    }
+    document_repository.items.append(document)
+    config_repository = InMemoryKnowledgeBaseConfigRepository(
+        KnowledgeBaseConfig(
+            knowledge_base_id=knowledge_base.id,
+            user_id=DEFAULT_USER_ID,
+            processing=ProcessingConfig(
+                separator="\\n\\n",
+                chunk_size=100,
+                chunk_overlap=0,
+                replace_consecutive_whitespace=True,
+                remove_urls_and_emails=True,
+                embedding_model_name="embed-test",
+            ),
+        )
+    )
+
+    app.dependency_overrides[get_knowledge_base_repository] = (
+        lambda: knowledge_base_repository
+    )
+    app.dependency_overrides[get_document_repository] = lambda: document_repository
+    app.dependency_overrides[get_chunk_repository] = lambda: chunk_repository
+    app.dependency_overrides[get_document_storage] = lambda: storage
+    app.dependency_overrides[get_vector_service] = lambda: vector_service
+    app.dependency_overrides[get_knowledge_base_config_repository] = (
+        lambda: config_repository
+    )
+    try:
+        response = TestClient(app).post(
+            f"/api/knowledge-bases/{knowledge_base.id}/documents/{document.id}/chunks"
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert [chunk["content"] for chunk in response.json()] == [
+        "first part",
+        "second part",
+    ]
 
 
 def make_knowledge_base(kb_id):

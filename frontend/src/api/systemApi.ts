@@ -7,7 +7,9 @@ export type HealthResponse = {
 
 export type HealthDependencyStatus = {
   status?: "ok" | "warning" | "error" | string
+  code?: string
   detail?: string
+  hint?: string
   error?: string
   model?: string
   provider?: string
@@ -50,7 +52,8 @@ export type SystemConfigResponse = {
     configured?: boolean
   }
   rerank?: {
-    enabled?: boolean
+    configured?: boolean
+    model_name?: string
     reason?: string
   }
 }
